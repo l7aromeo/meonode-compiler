@@ -28,6 +28,7 @@
   "preferUnplugged": true,
   "scripts": {
     "build": "cargo build --release -p meonode-swc-plugin --target wasm32-wasip1 && cp ../target/wasm32-wasip1/release/meonode_swc_plugin.wasm . && cp ../README.md .",
-    "build:debug": "cargo build -p meonode-swc-plugin --target wasm32-wasip1 && cp ../target/wasm32-wasip1/debug/meonode_swc_plugin.wasm . && cp ../README.md ."
+    "build:debug": "cargo build -p meonode-swc-plugin --target wasm32-wasip1 && cp ../target/wasm32-wasip1/debug/meonode_swc_plugin.wasm . && cp ../README.md .",
+    "prepublishOnly": "npm run build"
   }
 }

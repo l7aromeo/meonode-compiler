@@ -170,7 +170,7 @@ Plugin crate pinned to **`swc_core = "74"`** (currently resolving to
 | Host | Version | Bundler | Status |
 |---|---|---|---|
 | Next.js | 16.2.11 | Turbopack | Verified |
-| Next.js | 16.2.11 | webpack (`next build --webpack`) | Verified |
+| Next.js | 16.2.11 | webpack (`next build --webpack`) | Manually verified (not in automated e2e; Turbopack + Vite are) |
 | Vite (`@vitejs/plugin-react-swc`) | 4.3.2 | esbuild/Rollup + SWC transform | Verified |
 | `@swc/core` | 1.15.46 | (used directly by wasm-smoke tests) | Verified |
 
