@@ -14,6 +14,11 @@ use swc_core::ecma::ast::Program;
 use swc_core::plugin::metadata::TransformPluginProgramMetadata;
 use swc_core::plugin::plugin_transform;
 
+// Generated CSS property set (see scripts/codegen-css-set.ts). Not yet
+// consumed by the passthrough transform below — wired up in Task 9.
+#[allow(dead_code)]
+mod css_props;
+
 /// Entry point invoked by the SWC plugin host (next-swc / @swc/core).
 ///
 /// Returns the program unchanged. Kept as a minimal, verifiable scaffold so

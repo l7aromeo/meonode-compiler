@@ -75,8 +75,19 @@ rust-toolchain.toml
 crates/meonode-swc-plugin/
   Cargo.toml                        crate-type = ["cdylib", "rlib"]
   src/lib.rs                        passthrough #[plugin_transform]
+  src/css_props.rs                  @generated — see below
   tests/fixture/                    fixture tests land in Task 8
 npm/
   package.json                      "@meonode/compiler", main → .wasm
+scripts/codegen-css-set.ts          codegen for css_props.rs (see below)
 .github/workflows/ci.yml            cargo test + wasm32-wasip1 release build
 ```
+
+`crates/meonode-swc-plugin/src/css_props.rs` is generated (`bun run codegen`,
+i.e. `scripts/codegen-css-set.ts`) from `@meonode/ui`'s exported CSS property
+set — the single source of truth the runtime's static/dynamic prop
+classification also uses — and is committed to git; `bun run check:drift`
+regenerates it and fails on any diff, but CI does not yet run that check
+since the workflow doesn't check out a `@meonode/ui` ref (see the `if: false`
+TODO in `.github/workflows/ci.yml`), so drift detection is currently
+local/manual only.

@@ -24,3 +24,21 @@ jobs:
 
       - name: Build wasm32-wasip1 plugin (release)
         run: cargo build --release --target wasm32-wasip1 -p meonode-swc-plugin
+
+      # TODO: enable once @meonode/ui ref is cloneable in CI.
+      #
+      # crates/meonode-swc-plugin/src/css_props.rs is generated from
+      # @meonode/ui via `bun run codegen` (scripts/codegen-css-set.ts), which
+      # shells out to `bun run export:css-props` in a checkout of
+      # @meonode/ui (path via MEONODE_UI_DIR, default ../ui). This CI job
+      # only checks out this repo, so there is no ../ui to diff against and
+      # this step is a no-op placeholder (`if: false`) until @meonode/ui has
+      # a ref this workflow can check out (a public remote, a pinned commit
+      # via a private-repo checkout with a deploy key, or a vendored
+      # snapshot). Once that exists: check out @meonode/ui alongside this
+      # repo, drop the `if: false`, and this step will fail the build on any
+      # drift between the two repos' CSS property sets via
+      # `bun run check:drift`.
+      - name: CSS prop set drift check (disabled — see TODO above)
+        if: false
+        run: bun run check:drift
