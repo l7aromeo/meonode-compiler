@@ -41,6 +41,7 @@ use swc_core::ecma::ast::*;
 use swc_core::ecma::atoms::Atom;
 use swc_core::ecma::visit::{Visit, VisitWith};
 
+use crate::effect::is_effect_free;
 use crate::factories::factory_children_first;
 
 const UI_MODULE: &str = "@meonode/ui";
@@ -134,6 +135,28 @@ pub enum BailReason {
     /// The object literal already has a `__meo$` key (this call site has
     /// presumably already been compiled).
     ExistingMarker,
+    /// A property's value isn't provably free of side effects (see
+    /// `effect::is_effect_free`). Task 9's partitioner reorders evaluation
+    /// (all `c`-bucket props before all `d`-bucket props), which is only
+    /// behavior-preserving when every value commutes — i.e. is a literal,
+    /// identifier, function/arrow expression, substitution-free template, or
+    /// a nested object/array literal built entirely from those. Anything
+    /// that could observably run code (calls, member access, `await`,
+    /// assignments, `new`, tagged templates, conditionals, ...) bails.
+    ///
+    /// One exception: an effectful `children` value is allowed when
+    /// `children` is the last prop in source order (or the only prop) — see
+    /// [`validate_object`]'s doc comment for why that's still safe.
+    EffectfulValue,
+    /// An argument *before* `props_arg_idx` is a spread (e.g.
+    /// `P(...stuff, { color: 'red' })` or `Node(...els, { padding: 1 }, deps)`).
+    /// A leading spread means the real runtime argument count — and
+    /// therefore which argument actually lands at `props_arg_idx` — isn't
+    /// known until runtime, so rewriting "the object literal written at AST
+    /// position `props_arg_idx`" could target the wrong runtime argument
+    /// entirely. Bail rather than risk a wrong marker placement on
+    /// otherwise-valid input.
+    SpreadBeforeProps,
 }
 
 /// The detection outcome for a single call expression.
@@ -149,12 +172,9 @@ pub enum Decision {
 }
 
 /// A recorded detection outcome for one call expression, keyed by its span
-/// so Task 9's rewrite pass can correlate decisions back to AST nodes.
-///
-/// `lib.rs::process_transform` currently discards the returned decisions
-/// (Task 8 is detection-only — see module docs), so these fields have no
-/// non-test reader yet; Task 9's rewrite pass is the first real consumer.
-#[allow(dead_code)]
+/// so `partition.rs`'s rewrite pass can correlate decisions back to the
+/// matching `CallExpr` (by `(span.lo, span.hi)` byte offsets) once it starts
+/// mutating the tree.
 #[derive(Debug, Clone)]
 pub struct CallSiteDecision {
     pub span: Span,
@@ -345,6 +365,20 @@ impl Detector {
 }
 
 fn classify_props(call: &CallExpr, props_arg_idx: usize) -> Decision {
+    // A spread in any argument *before* the props position means the real
+    // runtime argument count isn't statically known, so "the AST argument at
+    // index `props_arg_idx`" isn't provably "the runtime props argument" —
+    // see `BailReason::SpreadBeforeProps`. Only relevant for
+    // `children_first`/`Node` calls, where `props_arg_idx > 0`; for plain
+    // `Html { children_first: false }` factories this range is empty.
+    let leading_args_end = props_arg_idx.min(call.args.len());
+    if call.args[..leading_args_end]
+        .iter()
+        .any(|arg| arg.spread.is_some())
+    {
+        return Decision::Bail(BailReason::SpreadBeforeProps);
+    }
+
     let Some(arg) = call.args.get(props_arg_idx) else {
         return Decision::Bail(BailReason::MissingPropsArg);
     };
@@ -368,6 +402,18 @@ fn unwrap_parens(mut expr: &Expr) -> &Expr {
     expr
 }
 
+/// The one special key exempt from the blanket effect-free requirement,
+/// under a narrow condition — see [`validate_object`]'s doc comment.
+const CHILDREN_KEY: &str = "children";
+
+fn is_children_key(key: &PropName) -> bool {
+    match key {
+        PropName::Ident(id) => id.sym.as_ref() == CHILDREN_KEY,
+        PropName::Str(s) => s.value == CHILDREN_KEY,
+        _ => false,
+    }
+}
+
 /// Validates an object literal as a compilable props object. Returns `None`
 /// if it's clean, or the first disqualifying [`BailReason`] found.
 ///
@@ -375,12 +421,37 @@ fn unwrap_parens(mut expr: &Expr) -> &Expr {
 /// structural validity) so a call site that already has `__meo$` is always
 /// reported as [`BailReason::ExistingMarker`], even if it happens to also
 /// contain some other bail-worthy shape.
+///
+/// ## The `children`-last exception
+///
+/// Every prop value must normally be provably side-effect-free (see
+/// [`is_effect_free`]'s doc comment for why). `children` gets one narrow
+/// exception: an effectful `children` value (most commonly, an array of
+/// nested factory calls like `[Div({...}), P('x', {...})]`) is still allowed
+/// *if `children` is the last prop in source order* (or the only prop).
+///
+/// `partition.rs`'s emit order moves every special key — `children` included
+/// — to the tail of the rewritten object, in their original relative order.
+/// So if `children` was already source-final, nothing else in the object
+/// moves past it: every other prop either gets bucketed into `c`/`d` (which
+/// sort *before* `children`'s new position, same as its old one) or is
+/// itself a special key that, by definition of `children` being *last*,
+/// already appeared before it in the source. Either way `children` keeps
+/// its evaluation position relative to everything else, so its effects
+/// (however arbitrary) aren't reordered relative to any sibling prop —
+/// only `children`'s own effectful sub-expressions (e.g. the nested calls'
+/// own props) run later than they would have, which is unobservable since
+/// nothing else in this object depends on when *those* run.
+///
+/// If `children` is effectful and NOT source-final, this exception doesn't
+/// apply and it bails like any other prop.
 fn validate_object(obj: &ObjectLit) -> Option<BailReason> {
     if obj.props.iter().any(is_marker_prop) {
         return Some(BailReason::ExistingMarker);
     }
 
-    for prop_or_spread in &obj.props {
+    let last_idx = obj.props.len().saturating_sub(1);
+    for (idx, prop_or_spread) in obj.props.iter().enumerate() {
         match prop_or_spread {
             PropOrSpread::Spread(_) => return Some(BailReason::SpreadProp),
             PropOrSpread::Prop(prop) => match &**prop {
@@ -388,6 +459,18 @@ fn validate_object(obj: &ObjectLit) -> Option<BailReason> {
                 Prop::KeyValue(kv) => {
                     if let Some(reason) = validate_key(&kv.key) {
                         return Some(reason);
+                    }
+                    // Every prop value — bucketed or special-key — must be
+                    // provably side-effect-free: Task 9's partitioner
+                    // reorders evaluation (all `c` before `d`), and special
+                    // keys move to the end of the emitted object (see
+                    // `partition.rs`), so nothing here can safely observe
+                    // side effects tied to source-order evaluation. The one
+                    // exception is a source-final `children` — see the
+                    // doc comment above.
+                    let is_exempt_children = is_children_key(&kv.key) && idx == last_idx;
+                    if !is_exempt_children && !is_effect_free(&kv.value) {
+                        return Some(BailReason::EffectfulValue);
                     }
                 }
                 Prop::Getter(_) | Prop::Setter(_) => {
@@ -473,11 +556,14 @@ pub fn detect(program: &Program) -> Vec<CallSiteDecision> {
     detector.decisions
 }
 
-/// Public entry point, wired into `lib.rs::process_transform`.
+/// Public entry point. Runs detection over `program` and returns the
+/// recorded decisions; intentionally does not mutate `program`.
 ///
-/// Runs detection over `program` and returns the recorded decisions.
-/// Intentionally does not mutate `program` — the rewrite that acts on these
-/// decisions lands in Task 9.
+/// `partition::transform_program` (wired into `lib.rs::process_transform`)
+/// calls this first to find every `Decision::Compilable` call site before it
+/// starts rewriting anything. `tests/fixture.rs` also calls this directly
+/// (via a detect-only `Pass`) to exercise detection in isolation, proving the
+/// visitor traverses these shapes without mutating anything on its own.
 pub fn transform_program(program: &Program) -> Vec<CallSiteDecision> {
     detect(program)
 }
@@ -764,6 +850,142 @@ mod tests {
             "#,
         );
         assert_eq!(decisions, vec![Decision::Bail(BailReason::MissingPropsArg)]);
+    }
+
+    #[test]
+    fn spread_before_props_bails_for_children_first_factory() {
+        // `stuff` spreads into the children-first argument position, so
+        // whatever ends up at AST index 1 isn't provably the runtime props
+        // argument — the real props object could land anywhere depending on
+        // how many elements `stuff` spreads in.
+        let decisions = decisions_for(
+            r#"
+            import { P } from '@meonode/ui';
+            P(...stuff, { color: 'red' });
+            "#,
+        );
+        assert_eq!(
+            decisions,
+            vec![Decision::Bail(BailReason::SpreadBeforeProps)]
+        );
+    }
+
+    #[test]
+    fn spread_before_props_bails_for_node() {
+        let decisions = decisions_for(
+            r#"
+            import { Node } from '@meonode/ui';
+            Node(...els, { padding: 1 });
+            "#,
+        );
+        assert_eq!(
+            decisions,
+            vec![Decision::Bail(BailReason::SpreadBeforeProps)]
+        );
+    }
+
+    #[test]
+    fn spread_before_props_check_does_not_affect_html_factories() {
+        // `props_arg_idx` is 0 for plain (non-children-first) HTML
+        // factories, so there's no "before props" range to check at all —
+        // make sure the new guard doesn't somehow reject a normal call.
+        let decisions = decisions_for(
+            r#"
+            import { Div } from '@meonode/ui';
+            Div({ padding: 1 });
+            "#,
+        );
+        assert_eq!(decisions, vec![Decision::Compilable { props_arg_idx: 0 }]);
+    }
+
+    #[test]
+    fn effectful_call_value_bails() {
+        let decisions = decisions_for(
+            r#"
+            import { Div } from '@meonode/ui';
+            Div({ padding: 1, x: f() });
+            "#,
+        );
+        assert_eq!(decisions, vec![Decision::Bail(BailReason::EffectfulValue)]);
+    }
+
+    #[test]
+    fn effectful_member_expr_value_bails() {
+        let decisions = decisions_for(
+            r#"
+            import { Div } from '@meonode/ui';
+            Div({ padding: 1, x: a.b });
+            "#,
+        );
+        assert_eq!(decisions, vec![Decision::Bail(BailReason::EffectfulValue)]);
+    }
+
+    #[test]
+    fn effect_free_prop_values_are_fine() {
+        let decisions = decisions_for(
+            r#"
+            import { Div } from '@meonode/ui';
+            Div({ padding: '20px', width, onClick: () => {}, css: { color: 'red' }, children: ['a', 'b'] });
+            "#,
+        );
+        assert_eq!(decisions, vec![Decision::Compilable { props_arg_idx: 0 }]);
+    }
+
+    #[test]
+    fn effectful_children_as_last_prop_is_fine() {
+        let decisions = decisions_for(
+            r#"
+            import { Div, P } from '@meonode/ui';
+            Div({ padding: '1px', onClick: h, children: [Div({ color: 'red' }), P('x', { color: 'blue' })] });
+            "#,
+        );
+        // Both the outer call and the two nested factory calls used as
+        // `children` are independently compilable — see module docs on the
+        // `children`-last exception.
+        assert_eq!(
+            decisions,
+            vec![
+                Decision::Compilable { props_arg_idx: 0 },
+                Decision::Compilable { props_arg_idx: 0 },
+                Decision::Compilable { props_arg_idx: 1 },
+            ]
+        );
+    }
+
+    #[test]
+    fn effectful_children_as_only_prop_is_fine() {
+        let decisions = decisions_for(
+            r#"
+            import { Div } from '@meonode/ui';
+            Div({ children: [f()] });
+            "#,
+        );
+        assert_eq!(decisions, vec![Decision::Compilable { props_arg_idx: 0 }]);
+    }
+
+    #[test]
+    fn effectful_children_not_last_bails() {
+        let decisions = decisions_for(
+            r#"
+            import { Div } from '@meonode/ui';
+            Div({ children: [f()], padding: '1px' });
+            "#,
+        );
+        assert_eq!(decisions, vec![Decision::Bail(BailReason::EffectfulValue)]);
+    }
+
+    #[test]
+    fn children_first_factory_arg0_is_unconstrained() {
+        // `P`'s children arg (index 0) is a separate call argument, never
+        // part of the props object — no effect-free constraint applies to
+        // it at all, even though it's an arbitrary call expression here.
+        let decisions = decisions_for(
+            r#"
+            import { P } from '@meonode/ui';
+            P(someCall(), { color: 'red' });
+            "#,
+        );
+        assert_eq!(decisions, vec![Decision::Compilable { props_arg_idx: 1 }]);
     }
 
     #[test]
