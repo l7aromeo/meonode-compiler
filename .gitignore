@@ -1,6 +1,7 @@
 /target
 node_modules/
 npm/*.wasm
+npm/README.md
 *.log
 .DS_Store
 .swc/

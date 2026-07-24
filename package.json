@@ -6,9 +6,10 @@
   "scripts": {
     "codegen": "bun run scripts/codegen-css-set.ts && bun run scripts/codegen-factories.ts",
     "check:drift": "bun run scripts/codegen-css-set.ts && bun run scripts/codegen-factories.ts && git diff --exit-code crates/meonode-swc-plugin/src/css_props.rs crates/meonode-swc-plugin/src/factories.rs",
-    "build:wasm": "cargo build --release -p meonode-swc-plugin --target wasm32-wasip1 && cp target/wasm32-wasip1/release/meonode_swc_plugin.wasm npm/meonode_swc_plugin.wasm",
+    "build:wasm": "cargo build --release -p meonode-swc-plugin --target wasm32-wasip1 && cp target/wasm32-wasip1/release/meonode_swc_plugin.wasm npm/meonode_swc_plugin.wasm && cp README.md npm/README.md",
     "test": "vitest run",
-    "test:e2e": "node e2e/scripts/run-e2e.mjs"
+    "test:e2e": "node e2e/scripts/run-e2e.mjs",
+    "release:dry": "echo 'semantic-release is not wired up in this repo yet (see README > Development > Publishing); bump npm/package.json manually and run npm publish --access public from npm/ after check:drift + test pass' && exit 1"
   },
   "devDependencies": {
     "@emotion/cache": "^11.14.0",
