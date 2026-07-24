@@ -71,3 +71,51 @@ jobs:
       # is compatible with @swc/core's, which `cargo build` alone can't.
       - name: WASM artifact smoke tests
         run: bun run test
+
+  # Task 12: builds the e2e/next-app (Next 16, Turbopack) and e2e/vite-app
+  # fixtures twice each (plugin on/off) and asserts HTML/DOM parity — see
+  # e2e/scripts/run-e2e.mjs. Slow (real bundler builds), so its own job
+  # rather than folded into `wasm-smoke`.
+  #
+  # TODO: enable once @meonode/ui ref is cloneable in CI (same blocker as the
+  # disabled CSS prop set drift check in the `test` job above) — both e2e
+  # fixtures depend on `@meonode/ui: file:../../../ui`, which needs a real
+  # ../ui checkout as a sibling of this repo's checkout.
+  e2e:
+    runs-on: ubuntu-latest
+    if: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: compiler
+
+      - uses: actions/checkout@v4
+        with:
+          repository: meonode/ui
+          path: ui
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: compiler
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Build @meonode/ui
+        working-directory: ui
+        run: bun install --frozen-lockfile && bun run build
+
+      - name: Build wasm32-wasip1 plugin (release)
+        working-directory: compiler
+        run: bun install --frozen-lockfile && bun run build:wasm
+
+      - name: E2E fixtures (Next Turbopack + Vite parity)
+        working-directory: compiler
+        run: bun run test:e2e

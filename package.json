@@ -7,7 +7,8 @@
     "codegen": "bun run scripts/codegen-css-set.ts && bun run scripts/codegen-factories.ts",
     "check:drift": "bun run scripts/codegen-css-set.ts && bun run scripts/codegen-factories.ts && git diff --exit-code crates/meonode-swc-plugin/src/css_props.rs crates/meonode-swc-plugin/src/factories.rs",
     "build:wasm": "cargo build --release -p meonode-swc-plugin --target wasm32-wasip1 && cp target/wasm32-wasip1/release/meonode_swc_plugin.wasm npm/meonode_swc_plugin.wasm",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:e2e": "node e2e/scripts/run-e2e.mjs"
   },
   "devDependencies": {
     "@emotion/cache": "^11.14.0",

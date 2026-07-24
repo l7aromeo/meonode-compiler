@@ -5,3 +5,14 @@ npm/*.wasm
 .DS_Store
 .swc/
 tests/.tmp/
+
+# e2e fixtures (Task 12): build outputs and installs, not source
+e2e/**/node_modules/
+e2e/**/.next/
+e2e/**/.next-on/
+e2e/**/.next-off/
+e2e/**/.next-webpack-on/
+e2e/**/.next-webpack-off/
+e2e/**/dist/
+e2e/**/dist-on/
+e2e/**/dist-off/

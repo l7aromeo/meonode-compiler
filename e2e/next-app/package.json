@@ -1,0 +1,22 @@
+{
+  "name": "@meonode/e2e-next-app",
+  "private": true,
+  "version": "0.0.1",
+  "description": "E2E fixture: Next.js 16 (Turbopack) app-router page compiled with @meonode/compiler, used to check plugin-on vs plugin-off HTML parity (Task 12).",
+  "scripts": {
+    "build": "next build",
+    "build:webpack": "next build --webpack",
+    "build:no-plugin": "MEONODE_COMPILER=0 next build",
+    "build:webpack:no-plugin": "MEONODE_COMPILER=0 next build --webpack"
+  },
+  "dependencies": {
+    "@meonode/compiler": "file:../../npm",
+    "@meonode/ui": "file:../../../ui",
+    "next": "^16.2.11",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "trustedDependencies": [
+    "unrs-resolver"
+  ]
+}
