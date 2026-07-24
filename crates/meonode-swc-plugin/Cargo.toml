@@ -1,0 +1,25 @@
+[package]
+name = "meonode-swc-plugin"
+description = "SWC WASM plugin that rewrites @meonode/ui call sites into pre-partitioned marker props"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+swc_core = { version = "74", features = ["ecma_plugin_transform"] }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+swc_core = { version = "74", features = ["testing_transform"] }
+
+# Compiles to a single .wasm plugin binary consumed by:
+#   - Next.js (Turbopack/webpack) via experimental.swcPlugins
+#   - Vite via @vitejs/plugin-react-swc's `plugins` option
+# Target: wasm32-wasip1 (see rust-toolchain.toml). Never wasm32-unknown-unknown —
+# the swc plugin host (swc_plugin_runner) expects a WASI module.

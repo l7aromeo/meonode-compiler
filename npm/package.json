@@ -1,0 +1,24 @@
+{
+  "name": "@meonode/compiler",
+  "version": "0.0.1",
+  "private": true,
+  "description": "SWC WASM plugin that rewrites @meonode/ui call sites into pre-partitioned marker props at build time",
+  "main": "meonode_swc_plugin.wasm",
+  "homepage": "https://github.com/meonode/compiler",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/meonode/compiler.git"
+  },
+  "license": "MIT",
+  "keywords": [
+    "swc",
+    "swc-plugin",
+    "meonode",
+    "compiler"
+  ],
+  "preferUnplugged": true,
+  "scripts": {
+    "build": "cargo build --release -p meonode-swc-plugin --target wasm32-wasip1 && cp ../target/wasm32-wasip1/release/meonode_swc_plugin.wasm .",
+    "build:debug": "cargo build -p meonode-swc-plugin --target wasm32-wasip1 && cp ../target/wasm32-wasip1/debug/meonode_swc_plugin.wasm ."
+  }
+}
