@@ -42,3 +42,32 @@ jobs:
       - name: CSS prop set drift check (disabled — see TODO above)
         if: false
         run: bun run check:drift
+
+  wasm-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install JS dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build wasm32-wasip1 plugin (release)
+        run: bun run build:wasm
+
+      # Loads the built artifact through @swc/core's real plugin host
+      # (see tests/wasm-smoke.test.ts) — proves the crate's swc_core ABI
+      # is compatible with @swc/core's, which `cargo build` alone can't.
+      - name: WASM artifact smoke tests
+        run: bun run test
