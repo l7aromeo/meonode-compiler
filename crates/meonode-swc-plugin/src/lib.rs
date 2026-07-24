@@ -7,8 +7,9 @@
 //! { __meo$: 1, c: { ... }, d: { ... }, k: '...', dyn: [ ... ] }
 //! ```
 //!
-//! This file is intentionally a no-op passthrough. The real call-site
-//! rewrite (visitor + partitioning logic) lands in Tasks 8-9.
+//! This file is intentionally a no-op passthrough with respect to output:
+//! Task 8 adds call-site *detection* (see `detect.rs`), but no rewriting
+//! happens yet. That lands in Task 9.
 
 use swc_core::ecma::ast::Program;
 use swc_core::plugin::metadata::TransformPluginProgramMetadata;
@@ -19,11 +20,25 @@ use swc_core::plugin::plugin_transform;
 #[allow(dead_code)]
 mod css_props;
 
+// Generated @meonode/ui HTML factory table (see
+// scripts/codegen-factories.ts), consumed by `detect`.
+mod factories;
+
+// Factory call-site detection (no rewriting yet — see module docs). Public
+// so `tests/fixture.rs` (an external integration test crate) can drive the
+// real detection pass, matching what `process_transform` does below.
+pub mod detect;
+
 /// Entry point invoked by the SWC plugin host (next-swc / @swc/core).
 ///
-/// Returns the program unchanged. Kept as a minimal, verifiable scaffold so
-/// CI can build the wasm32-wasip1 artifact before any transform logic exists.
+/// Runs call-site detection (see `detect::transform_program`) and returns
+/// the program unchanged. The host has already run the SWC resolver before
+/// invoking this plugin (see `TransformPluginProgramMetadata` and
+/// `detect`'s module docs), so `Ident`s here already carry resolved
+/// `SyntaxContext`s — detection does not need to (and must not) run the
+/// resolver itself.
 #[plugin_transform]
 pub fn process_transform(program: Program, _metadata: TransformPluginProgramMetadata) -> Program {
+    let _decisions = detect::transform_program(&program);
     program
 }

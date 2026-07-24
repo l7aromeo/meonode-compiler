@@ -16,7 +16,7 @@ swc_core = { version = "74", features = ["ecma_plugin_transform"] }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
-swc_core = { version = "74", features = ["testing_transform"] }
+swc_core = { version = "74", features = ["testing_transform", "ecma_parser"] }
 
 # Compiles to a single .wasm plugin binary consumed by:
 #   - Next.js (Turbopack/webpack) via experimental.swcPlugins

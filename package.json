@@ -4,7 +4,7 @@
   "private": true,
   "description": "Repo-root tooling scripts for @meonode/compiler (codegen, drift checks). Not published — see npm/package.json for the published package.",
   "scripts": {
-    "codegen": "bun run scripts/codegen-css-set.ts",
-    "check:drift": "bun run scripts/codegen-css-set.ts && git diff --exit-code crates/meonode-swc-plugin/src/css_props.rs"
+    "codegen": "bun run scripts/codegen-css-set.ts && bun run scripts/codegen-factories.ts",
+    "check:drift": "bun run scripts/codegen-css-set.ts && bun run scripts/codegen-factories.ts && git diff --exit-code crates/meonode-swc-plugin/src/css_props.rs crates/meonode-swc-plugin/src/factories.rs"
   }
 }
