@@ -1,6 +1,6 @@
 {
   "name": "@meonode/compiler",
-  "version": "0.0.0-dev.0",
+  "version": "0.1.0",
   "description": "SWC WASM plugin that rewrites @meonode/ui call sites into pre-partitioned marker props at build time, letting the @meonode/ui runtime skip its own static/dynamic prop classification and prop-signature hashing on every render",
   "main": "meonode_swc_plugin.wasm",
   "homepage": "https://github.com/l7aromeo/meonode-compiler",
@@ -10,6 +10,10 @@
   },
   "bugs": {
     "url": "https://github.com/l7aromeo/meonode-compiler/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   },
   "license": "MIT",
   "keywords": [

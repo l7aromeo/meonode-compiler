@@ -1,0 +1,135 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  # Minimal, fast verification — NOT the full ci.yml matrix. ci.yml already
+  # runs on every push to main (test, css-drift, wasm-smoke, e2e); running
+  # that whole matrix again here would just double the cost of every merge
+  # to main for no extra safety, since ci.yml has already gated the PR.
+  #
+  # We considered gating `release` on ci.yml via `workflow_run` instead (so
+  # this workflow never re-runs any of ci.yml's jobs at all), but that trades
+  # a small amount of duplicated work for meaningfully more complexity and a
+  # sharper failure mode: `workflow_run` fires from the workflow file on the
+  # default branch, requires explicitly checking out
+  # `github.event.workflow_run.head_sha` to get the right commit, and is easy
+  # to get subtly wrong in a way that would publish an unverified commit —
+  # exactly the place a mistake is most expensive. A same-push, self-
+  # contained `verify` job that redoes the cheap parts (cargo test + wasm
+  # build + wasm smoke test) is simpler to read, simpler to debug, and keeps
+  # "what does the released commit have to pass" visible in one file. It
+  # deliberately skips the slow/heavier jobs (css-drift, e2e) that ci.yml
+  # already covers pre-merge.
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo test
+        run: cargo test --workspace
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install JS dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build wasm32-wasip1 plugin (release) + copy README into npm/
+        run: bun run build:wasm
+
+      - name: WASM artifact smoke tests
+        run: bun run test
+
+  release:
+    name: Release
+    needs: [verify]
+    runs-on: ubuntu-latest
+    # One-time gate: npm requires a package to already exist on the registry
+    # before OIDC trusted publishing can be configured for it, so
+    # @meonode/compiler@0.1.0 must be published manually first (see README >
+    # Development > Publishing). Until that manual bootstrap is done AND
+    # trusted publishing is configured on npmjs.com for this repo + this
+    # workflow file, letting this job run on every push to main would just
+    # fail noisily at the `npm publish` step every time a release-worthy
+    # commit lands. Gate it on a repository variable instead of a code change
+    # so un-gating after bootstrap is a one-click Settings change, not a PR:
+    #
+    #   Repo Settings > Secrets and variables > Actions > Variables tab >
+    #   New repository variable > name RELEASE_TRUSTED_PUBLISHING_READY,
+    #   value true
+    #
+    # Until that variable is set to "true", this job is skipped entirely
+    # (shows as skipped in the Actions UI, not failed) and nothing publishes.
+    if: vars.RELEASE_TRUSTED_PUBLISHING_READY == 'true'
+    environment: Production
+    concurrency:
+      group: release-${{ github.ref }}
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      id-token: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Setup Node.js (OIDC trusted publishing needs registry-url set)
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          registry-url: https://registry.npmjs.org
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install JS dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Verify provenance attestations
+        run: npm audit signatures
+
+      # Belt and braces: @semantic-release/npm's publish step runs
+      # `npm publish npm/ --tag ... --registry ...`, which does trigger
+      # npm/package.json's own `prepublishOnly` (npm packs/publishes the
+      # target directory's own package.json and its lifecycle scripts, same
+      # as running `npm publish` with npm/ as cwd). Building explicitly here
+      # first, same as @meonode/ui's release workflow does with `bun run
+      # build`, means the wasm artifact + README are already in place before
+      # semantic-release runs regardless of any lifecycle-script edge case.
+      - name: Build wasm32-wasip1 plugin (release) + copy README into npm/
+        run: bun run build:wasm
+
+      - name: Run semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bunx semantic-release

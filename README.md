@@ -227,18 +227,48 @@ is caught on every push/PR, not just as a local/manual pre-release step.
 
 ### Publishing
 
-Unlike `@meonode/ui`, this repo does not have `semantic-release` wired up
-yet. The published version is a plain literal in `npm/package.json`
-(currently `0.0.0-dev.0` — publishing is not live). `.github/workflows/ci.yml`
-has a manual (`workflow_dispatch`-only) release job skeleton with the publish
-steps stubbed out (npm OIDC trusted publishing, mirroring `@meonode/ui`'s own
-release workflow — no `NPM_TOKEN` secret involved), gated behind its own
-`if: false` until trusted publishing is configured on npmjs.com; nothing
-publishes automatically. Cutting a real release for now means
-manually bumping `npm/package.json`'s version and running
-`npm publish --access public` from `npm/` by hand, after `bun run
-check:drift` and `bun run test` both pass. Automating that (semantic-release
-or otherwise) is future work, not v1.
+`semantic-release` is wired up (`.releaserc.json` at repo root, `.github/workflows/release.yml`),
+mirroring `@meonode/ui`'s own setup: `@semantic-release/{commit-analyzer,
+release-notes-generator,npm,github}`, tokenless npm OIDC trusted publishing
+(`id-token: write` + `actions/setup-node`'s `registry-url` +
+`npm audit signatures` — no `NPM_TOKEN` secret). One difference from `ui`:
+the publishable package lives in `npm/`, not the repo root, so the npm plugin
+is configured with `pkgRoot: "npm"` — it bumps `npm/package.json`'s version
+and runs `npm publish` from there (which still fires `npm/package.json`'s own
+`prepublishOnly` build step; `release.yml` also builds the wasm explicitly
+beforehand as a belt-and-braces measure). Only `branches: ["main"]` is
+configured — no `beta`/`alpha` prerelease channels, unlike `ui`, since this
+package has no prerelease flow yet.
+
+**npm requires a package to already exist on the registry before trusted
+publishing can be configured for it.** That means the very first version,
+`0.1.0`, cannot go out through CI — it has to be published by hand once,
+after which every `0.1.x`/`0.2.0`/etc. release is fully automated from
+conventional commits on `main`. In order:
+
+1. **Manual bootstrap (one time only), by hand, locally:**
+   ```bash
+   bun run check:drift && bun run test   # must both pass first
+   npm login                              # as a user with publish rights on @meonode
+   cd npm
+   npm publish --access public            # publishes @meonode/compiler@0.1.0
+   ```
+2. **Configure npm trusted publishing** at
+   [npmjs.com](https://www.npmjs.com) → `@meonode/compiler` package →
+   Settings → Publishing access → add a trusted publisher: GitHub repo
+   `l7aromeo/meonode-compiler`, workflow `release.yml`, environment
+   `Production` (matching `release.yml`'s `environment:` — leave blank if you
+   didn't configure a GitHub Environment named `Production`).
+3. **Un-gate the workflow.** `release.yml`'s `release` job is gated behind a
+   repository variable so it can't attempt (and noisily fail) a publish
+   before steps 1–2 are done: Repo Settings → Secrets and variables →
+   Actions → Variables tab → New repository variable → name
+   `RELEASE_TRUSTED_PUBLISHING_READY`, value `true`.
+
+After that, every `feat`/`fix`/etc. conventional commit merged to `main`
+triggers `release.yml`, which builds the wasm, runs `semantic-release`, bumps
+`npm/package.json`'s version, publishes via OIDC trusted publishing (no
+token), and creates the matching GitHub release — no further manual steps.
 
 ## Layout
 
@@ -259,7 +289,9 @@ npm/
   meonode_swc_plugin.wasm           build artifact, not committed to git
 e2e/                                Next.js + Vite real-build parity fixtures
 scripts/                            codegen for css_props.rs / factories.rs
-.github/workflows/ci.yml            cargo test, wasm build, wasm smoke tests, e2e (gated), release skeleton (manual)
+.releaserc.json                     semantic-release config (pkgRoot: npm)
+.github/workflows/ci.yml            cargo test, wasm build, wasm smoke tests, e2e (gated)
+.github/workflows/release.yml       semantic-release + npm OIDC trusted publishing (gated, see Publishing)
 ```
 
 ## License

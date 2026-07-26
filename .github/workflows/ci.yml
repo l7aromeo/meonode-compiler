@@ -4,11 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-  # Manual-only trigger for the `release` job below. Pushes/PRs never run it
-  # (see that job's own `if: false` gate — this is belt-and-suspenders until
-  # npm OIDC trusted publishing is actually configured and publishing is
-  # intentionally enabled).
-  workflow_dispatch: {}
 
 jobs:
   test:
@@ -140,73 +135,3 @@ jobs:
 
       - name: E2E fixtures (Next Turbopack + Vite parity)
         run: bun run test:e2e
-
-  # Task 13: release job SKELETON. NOT wired up — automation is intentionally
-  # not enabled yet (see README > Development > Publishing: no semantic-release,
-  # manual version bump + `npm publish` for now). This exists so the actual
-  # publish steps are reviewable and ready to flip on later, not so it runs.
-  #
-  # Publish step mirrors @meonode/ui's own release workflow's approach: npm
-  # OIDC trusted publishing (`id-token: write` permission + setup-node's
-  # `registry-url` + `npm audit signatures`), not a long-lived `NPM_TOKEN`
-  # secret — see
-  # https://github.com/l7aromeo/meonode-ui/blob/main/.github/workflows/release.yml
-  #
-  # To actually enable this job:
-  #   1. Remove the `if: false` gate below (the `workflow_dispatch`-only
-  #      trigger on its own is not considered a sufficient safeguard against
-  #      accidental runs, hence the extra explicit gate).
-  #   2. TODO: configure npm OIDC trusted publishing for the `@meonode` org/
-  #      package on npmjs.com (Settings > Publishing access > add this repo +
-  #      workflow as a trusted publisher). No repo secret is needed —
-  #      `id-token: write` below is sufficient once that's configured.
-  #   3. TODO: decide on a real versioning story (manual bump vs.
-  #      semantic-release) before the first publish — `npm/package.json` is
-  #      currently pinned to the placeholder `0.0.0-dev.0`.
-  #   4. TODO: gate this job on a git tag or manual version input rather than
-  #      just `workflow_dispatch`, so a publish can't happen without an
-  #      explicit version decision.
-  release:
-    runs-on: ubuntu-latest
-    if: false # TODO: remove once npm OIDC trusted publishing is configured and publishing is intentionally enabled
-    needs: [test, wasm-smoke]
-    permissions:
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip1
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Install bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Install JS dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Build wasm32-wasip1 plugin (release) + copy README into npm/
-        run: bun run build:wasm
-
-      - name: Set up Node for npm publish (OIDC trusted publishing)
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
-
-      - name: Verify provenance attestations
-        run: npm audit signatures
-
-      # No NODE_AUTH_TOKEN / NPM_TOKEN: npm OIDC trusted publishing
-      # authenticates via the `id-token: write` permission above plus the
-      # registry-url configured by setup-node, no long-lived npm token
-      # secret needed. `--access public` is required the first time a new
-      # scoped package is published; harmless on subsequent publishes.
-      - name: npm publish (from npm/)
-        working-directory: npm
-        run: npm publish --access public

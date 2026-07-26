@@ -9,16 +9,21 @@
     "build:wasm": "cargo build --release -p meonode-swc-plugin --target wasm32-wasip1 && cp target/wasm32-wasip1/release/meonode_swc_plugin.wasm npm/meonode_swc_plugin.wasm && cp README.md npm/README.md",
     "test": "vitest run",
     "test:e2e": "node e2e/scripts/run-e2e.mjs",
-    "release:dry": "echo 'semantic-release is not wired up in this repo yet (see README > Development > Publishing); bump npm/package.json manually and run npm publish --access public from npm/ after check:drift + test pass' && exit 1"
+    "release:dry": "semantic-release --dry-run"
   },
   "devDependencies": {
     "@emotion/cache": "^11.14.0",
     "@emotion/react": "^11.14.0",
     "@meonode/ui": "1.7.0-beta.1",
+    "@semantic-release/commit-analyzer": "^13.0.1",
+    "@semantic-release/github": "^12.0.9",
+    "@semantic-release/npm": "^13.1.5",
+    "@semantic-release/release-notes-generator": "^14.1.1",
     "@swc/core": "^1.15",
     "jsdom": "^29.1.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
+    "semantic-release": "^25.0.5",
     "vitest": "^4"
   },
   "trustedDependencies": [
