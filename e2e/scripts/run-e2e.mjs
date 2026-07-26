@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Orchestrates Task 12's two e2e fixtures end to end:
 //
-//   1. bun install each fixture (file:-linked against ../../npm and
-//      ../../../ui — see root package.json / e2e/*/package.json).
+//   1. bun install each fixture: @meonode/compiler is file:-linked against
+//      ../../npm, @meonode/ui is an exact npm registry pin (see
+//      e2e/*/package.json and the README > Development note on bumping it).
 //   2. Build each fixture twice: once with the @meonode/compiler swc plugin
 //      enabled, once with MEONODE_COMPILER=0 (plugin disabled), renaming the
 //      bundler's output directory after each build so both copies survive
@@ -53,22 +54,17 @@ async function buildTwice({ label, cwd, outDir, buildScript, noPluginScript, onD
 console.log('=== bun install: e2e/next-app ===')
 run('bun', ['install'], NEXT_APP_DIR)
 
-// bun installs each `file:` dep's node_modules entry as a symlink per
+// bun installs a `file:` dep's node_modules entry as a symlink per
 // top-level file rather than one directory symlink (see
 // link-local-packages.mjs's own header comment for the full story).
-// Turbopack's package.json reader can't parse that shape once
-// `turbopack.root` is widened to cover both sibling repos, so normalize
-// @meonode/compiler and @meonode/ui into plain directory symlinks after
-// every install — bun re-creates the broken shape on each `bun install`.
+// Turbopack's package.json reader can't parse that shape, so normalize
+// @meonode/compiler (still file:-linked against ../../npm) into a plain
+// directory symlink after every install — bun re-creates the broken shape
+// on each `bun install`. @meonode/ui no longer needs this: it's an ordinary
+// npm registry dependency now, installed as a normal package directory.
 run(
   'node',
-  [
-    path.join(SCRIPTS_DIR, 'link-local-packages.mjs'),
-    'node_modules/@meonode/compiler',
-    '../../npm',
-    'node_modules/@meonode/ui',
-    '../../../ui',
-  ],
+  [path.join(SCRIPTS_DIR, 'link-local-packages.mjs'), 'node_modules/@meonode/compiler', '../../npm'],
   NEXT_APP_DIR,
 )
 

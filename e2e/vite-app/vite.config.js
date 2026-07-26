@@ -13,15 +13,16 @@ export default defineConfig({
     }),
   ],
   resolve: {
-    // @meonode/ui is a symlinked sibling repo (file:../../../ui) with its
-    // own separately-installed react/react-dom (a different disk copy/
-    // version than this app's). Without forcing dedupe, Rollup bundles two
-    // independent react-dom instances, and components using hooks from ui's
-    // copy (e.g. useEffectEvent in its unmount-cleanup wrapper) read a
-    // dispatcher that this app's actively-rendering react-dom never sets —
-    // "Cannot read properties of null (reading 'useEffectEvent')". Next.js
-    // avoids this by aliasing react/react-dom to the project's own copy
-    // unconditionally; Vite needs it spelled out via `dedupe`.
+    // @meonode/ui (an npm registry dependency — see package.json) can end up
+    // with its own nested react/react-dom under its own node_modules if
+    // bun's resolver doesn't hoist it to this app's copy. Without forcing
+    // dedupe, Rollup bundles two independent react-dom instances, and
+    // components using hooks from ui's copy (e.g. useEffectEvent in its
+    // unmount-cleanup wrapper) read a dispatcher that this app's
+    // actively-rendering react-dom never sets — "Cannot read properties of
+    // null (reading 'useEffectEvent')". Next.js avoids this by aliasing
+    // react/react-dom to the project's own copy unconditionally; Vite needs
+    // it spelled out via `dedupe`.
     dedupe: ['react', 'react-dom'],
   },
   build: {

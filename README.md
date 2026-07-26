@@ -202,6 +202,15 @@ bun run test            # cargo test --workspace + vitest (unit/fixture + wasm s
 bun run test:e2e        # Next Turbopack + Vite real-build parity fixtures (slow — real bundler builds)
 ```
 
+`@meonode/ui` is pinned to an exact prerelease version (currently
+`1.7.0-beta.1`, the `beta` dist-tag) in the root `package.json` and in
+`e2e/next-app`/`e2e/vite-app`'s `package.json`, rather than a semver range,
+so `bun run test` / `bun run test:e2e` stay reproducible. This repo's compiler
+runtime fast path depends on `@meonode/ui` runtime support that is still on
+an unreleased branch (see the compatibility note above) — bump this pin
+whenever `@meonode/ui` cuts a new `beta` (or, once the runtime support lands
+on its default branch, switch to a real released version).
+
 Test coverage as of this writing: 115 Rust tests (unit + SWC fixture tests),
 24 Vitest tests (9 WASM artifact smoke tests via `@swc/core`'s real plugin
 host, 8 server-side semantic-equivalence tests, 7 client-side), plus the
@@ -212,10 +221,9 @@ and `src/factories.rs` (139 `@meonode/ui` HTML factories) are both generated
 from `@meonode/ui`'s own exports — the same source of truth the runtime's
 static/dynamic classification uses — and are committed to git. `check:drift`
 regenerates both and fails the command if `@meonode/ui` has moved out from
-under the committed snapshot; CI doesn't run it yet (it needs a `@meonode/ui`
-checkout as a sibling directory, which the CI job doesn't have — see the
-`if: false` step in `.github/workflows/ci.yml`), so drift detection is
-currently a local/manual pre-release step.
+under the committed snapshot; CI runs this in the `css-drift` job against a
+source checkout of `@meonode/ui` (see `.github/workflows/ci.yml`), so drift
+is caught on every push/PR, not just as a local/manual pre-release step.
 
 ### Publishing
 
@@ -223,8 +231,10 @@ Unlike `@meonode/ui`, this repo does not have `semantic-release` wired up
 yet. The published version is a plain literal in `npm/package.json`
 (currently `0.0.0-dev.0` — publishing is not live). `.github/workflows/ci.yml`
 has a manual (`workflow_dispatch`-only) release job skeleton with the publish
-steps stubbed out, gated behind an `NPM_TOKEN` secret that isn't configured;
-nothing publishes automatically. Cutting a real release for now means
+steps stubbed out (npm OIDC trusted publishing, mirroring `@meonode/ui`'s own
+release workflow — no `NPM_TOKEN` secret involved), gated behind its own
+`if: false` until trusted publishing is configured on npmjs.com; nothing
+publishes automatically. Cutting a real release for now means
 manually bumping `npm/package.json`'s version and running
 `npm publish --access public` from `npm/` by hand, after `bun run
 check:drift` and `bun run test` both pass. Automating that (semantic-release

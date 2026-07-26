@@ -9,13 +9,13 @@
 //   Error parsing package.json file
 //   package.json is not parseable: invalid JSON: a redirect can't be parsed as json
 //
-// This repo's e2e fixtures need `turbopack.root` widened to the @meonode/
-// parent directory (npm/ lives in ../compiler, @meonode/ui lives in a sibling
-// repo entirely) — see e2e/next-app/next.config.mjs. Once root is that wide,
-// Turbopack's workspace package.json scan touches every local `file:` dep
-// under it, including compiler's own devDependency on @meonode/ui. This
-// script normalizes any of those into a plain single directory symlink so
-// Turbopack's parser sees an ordinary package the same way npm/yarn would
+// This repo's e2e fixtures need `turbopack.root` widened to this repo's root
+// (npm/ lives at ../../npm relative to e2e/next-app, outside its own
+// directory) — see e2e/next-app/next.config.mjs. This script normalizes that
+// one `file:` dep (currently just @meonode/compiler — @meonode/ui is an
+// ordinary npm registry dependency now, installed as a normal package
+// directory with no symlink involved) into a plain single directory symlink
+// so Turbopack's parser sees an ordinary package the same way npm/yarn would
 // have installed it — no functional change versus bun's own resolution
 // (Node's require/import follow the same real files either way).
 import { existsSync, lstatSync, realpathSync, rmSync, symlinkSync } from 'node:fs'

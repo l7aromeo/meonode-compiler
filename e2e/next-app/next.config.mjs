@@ -11,14 +11,15 @@ const useMeonode = process.env.MEONODE_COMPILER !== '0'
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // bun's `file:` installs symlink individual entries (not one directory
-  // symlink) whose targets point at ../../npm (@meonode/compiler) and
-  // ../../../ui (@meonode/ui) — outside e2e/next-app entirely. Turbopack
-  // refuses to read through a symlink that resolves outside its project
-  // root, so root must cover the common ancestor of both targets (the
-  // @meonode/ directory, one level above this repo).
+  // bun's `file:` install of @meonode/compiler symlinks individual entries
+  // (not one directory symlink) whose target is ../../npm — this repo's own
+  // npm/ directory, outside e2e/next-app entirely. Turbopack refuses to read
+  // through a symlink that resolves outside its project root, so root must
+  // cover that target: this repo's root, two levels up from e2e/next-app.
+  // @meonode/ui is an ordinary npm registry dependency (see package.json),
+  // not file:-linked, so it doesn't factor into this.
   turbopack: {
-    root: path.resolve(__dirname, '../../../'),
+    root: path.resolve(__dirname, '../../'),
   },
   experimental: {
     swcPlugins: useMeonode ? [['@meonode/compiler', {}]] : [],

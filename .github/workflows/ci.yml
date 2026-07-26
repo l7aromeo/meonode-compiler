@@ -40,9 +40,11 @@ jobs:
   # `cargo test` in `test` needs. Keeping them apart means `test` stays a
   # fast Rust-only job and this one doesn't touch the Rust toolchain at all.
   #
-  # Checked out against ui's default branch (not `beta`, unlike the `e2e` job
-  # below) because the generated CSS prop set / factory table are meant to
-  # track what's actually published, not upcoming runtime support.
+  # Checked out at `ref: beta`, same as the `e2e` job below: ui's
+  # `export:css-props` script (scripts/export-css-properties.ts), which this
+  # job's `bun run check:drift` shells out to, only exists on that branch —
+  # `error: Script not found "export:css-props"` against ui's default branch.
+  # Move this to ui's default branch once it merges there.
   css-drift:
     runs-on: ubuntu-latest
     steps:
@@ -53,6 +55,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: l7aromeo/meonode-ui
+          ref: beta
           path: ui
 
       - name: Install bun
@@ -108,28 +111,17 @@ jobs:
   # e2e/scripts/run-e2e.mjs. Slow (real bundler builds), so its own job
   # rather than folded into `wasm-smoke`.
   #
-  # @meonode/ui is public (https://github.com/l7aromeo/meonode-ui). Checked
-  # out at `ref: beta` — not ui's default branch — because the
-  # compiler-runtime support these fixtures exercise (the plugin/runtime
-  # integration under test) hasn't landed on ui's default branch yet. Move
-  # this to ui's default branch (or drop `ref:` entirely) once it has.
-  #
-  # `path: compiler` / `path: ui` land as siblings under $GITHUB_WORKSPACE,
-  # matching what e2e/next-app and e2e/vite-app expect via their
-  # `@meonode/ui: file:../../../ui` dependency (see e2e/scripts/run-e2e.mjs
-  # and link-local-packages.mjs).
+  # No @meonode/ui checkout needed here (unlike `css-drift` above): the e2e
+  # fixtures depend on @meonode/ui via an exact npm registry pin
+  # (`1.7.0-beta.1`, the `beta` dist-tag — see e2e/next-app/package.json,
+  # e2e/vite-app/package.json, and the README > Development note on bumping
+  # it), installed like any other dependency by `bun install` inside
+  # e2e/scripts/run-e2e.mjs. Bump that pin (and re-run `bun run test:e2e`
+  # locally) whenever @meonode/ui cuts a new relevant `beta` build.
   e2e:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: compiler
-
-      - uses: actions/checkout@v4
-        with:
-          repository: l7aromeo/meonode-ui
-          ref: beta
-          path: ui
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -137,27 +129,16 @@ jobs:
           targets: wasm32-wasip1
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: compiler
 
       - name: Install bun
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
 
-      # Only the package build is needed here (not ui's own CI's fixture
-      # install for tests/rsc-fixtures/next-app — that's for ui's RSC test
-      # suite, unrelated to these e2e fixtures).
-      - name: Build @meonode/ui
-        working-directory: ui
-        run: bun install --frozen-lockfile && bun run build
-
       - name: Build wasm32-wasip1 plugin (release)
-        working-directory: compiler
         run: bun install --frozen-lockfile && bun run build:wasm
 
       - name: E2E fixtures (Next Turbopack + Vite parity)
-        working-directory: compiler
         run: bun run test:e2e
 
   # Task 13: release job SKELETON. NOT wired up — automation is intentionally
