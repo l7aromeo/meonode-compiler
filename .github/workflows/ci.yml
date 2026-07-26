@@ -6,7 +6,8 @@ on:
   pull_request:
   # Manual-only trigger for the `release` job below. Pushes/PRs never run it
   # (see that job's own `if: false` gate — this is belt-and-suspenders until
-  # NPM_TOKEN is actually configured and publishing is intentionally enabled).
+  # npm OIDC trusted publishing is actually configured and publishing is
+  # intentionally enabled).
   workflow_dispatch: {}
 
 jobs:
@@ -29,22 +30,48 @@ jobs:
       - name: Build wasm32-wasip1 plugin (release)
         run: cargo build --release --target wasm32-wasip1 -p meonode-swc-plugin
 
-      # TODO: enable once @meonode/ui ref is cloneable in CI.
-      #
-      # crates/meonode-swc-plugin/src/css_props.rs is generated from
-      # @meonode/ui via `bun run codegen` (scripts/codegen-css-set.ts), which
-      # shells out to `bun run export:css-props` in a checkout of
-      # @meonode/ui (path via MEONODE_UI_DIR, default ../ui). This CI job
-      # only checks out this repo, so there is no ../ui to diff against and
-      # this step is a no-op placeholder (`if: false`) until @meonode/ui has
-      # a ref this workflow can check out (a public remote, a pinned commit
-      # via a private-repo checkout with a deploy key, or a vendored
-      # snapshot). Once that exists: check out @meonode/ui alongside this
-      # repo, drop the `if: false`, and this step will fail the build on any
-      # drift between the two repos' CSS property sets via
-      # `bun run check:drift`.
-      - name: CSS prop set drift check (disabled — see TODO above)
-        if: false
+  # CSS prop set + factory table drift check against @meonode/ui
+  # (https://github.com/l7aromeo/meonode-ui, public). Split out from `test`
+  # rather than folded in: crates/meonode-swc-plugin/src/css_props.rs and
+  # .../factories.rs are generated from a sibling @meonode/ui checkout
+  # (scripts/codegen-css-set.ts and scripts/codegen-factories.ts default
+  # MEONODE_UI_DIR to "../ui" relative to this repo's root — see those
+  # scripts), which needs both a `ui` checkout and bun, neither of which
+  # `cargo test` in `test` needs. Keeping them apart means `test` stays a
+  # fast Rust-only job and this one doesn't touch the Rust toolchain at all.
+  #
+  # Checked out against ui's default branch (not `beta`, unlike the `e2e` job
+  # below) because the generated CSS prop set / factory table are meant to
+  # track what's actually published, not upcoming runtime support.
+  css-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: compiler
+
+      - uses: actions/checkout@v4
+        with:
+          repository: l7aromeo/meonode-ui
+          path: ui
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install JS dependencies
+        working-directory: compiler
+        run: bun install --frozen-lockfile
+
+      # `bun run check:drift` shells out to `bun run export:css-props` in
+      # ../ui (this job's `ui` checkout, a sibling of `compiler`), which reads
+      # straight from ui's src/constant/css-properties.const.ts via bun's
+      # native tsconfig path-alias resolution — no `bun install`/build needed
+      # in the `ui` checkout itself, unlike the `e2e` job below which needs
+      # ui's actual built package.
+      - name: CSS prop set + factory table drift check
+        working-directory: compiler
         run: bun run check:drift
 
   wasm-smoke:
@@ -81,13 +108,18 @@ jobs:
   # e2e/scripts/run-e2e.mjs. Slow (real bundler builds), so its own job
   # rather than folded into `wasm-smoke`.
   #
-  # TODO: enable once @meonode/ui ref is cloneable in CI (same blocker as the
-  # disabled CSS prop set drift check in the `test` job above) — both e2e
-  # fixtures depend on `@meonode/ui: file:../../../ui`, which needs a real
-  # ../ui checkout as a sibling of this repo's checkout.
+  # @meonode/ui is public (https://github.com/l7aromeo/meonode-ui). Checked
+  # out at `ref: beta` — not ui's default branch — because the
+  # compiler-runtime support these fixtures exercise (the plugin/runtime
+  # integration under test) hasn't landed on ui's default branch yet. Move
+  # this to ui's default branch (or drop `ref:` entirely) once it has.
+  #
+  # `path: compiler` / `path: ui` land as siblings under $GITHUB_WORKSPACE,
+  # matching what e2e/next-app and e2e/vite-app expect via their
+  # `@meonode/ui: file:../../../ui` dependency (see e2e/scripts/run-e2e.mjs
+  # and link-local-packages.mjs).
   e2e:
     runs-on: ubuntu-latest
-    if: false
     steps:
       - uses: actions/checkout@v4
         with:
@@ -95,7 +127,8 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          repository: meonode/ui
+          repository: l7aromeo/meonode-ui
+          ref: beta
           path: ui
 
       - name: Install Rust toolchain
@@ -112,6 +145,9 @@ jobs:
         with:
           bun-version: latest
 
+      # Only the package build is needed here (not ui's own CI's fixture
+      # install for tests/rsc-fixtures/next-app — that's for ui's RSC test
+      # suite, unrelated to these e2e fixtures).
       - name: Build @meonode/ui
         working-directory: ui
         run: bun install --frozen-lockfile && bun run build
@@ -129,12 +165,20 @@ jobs:
   # manual version bump + `npm publish` for now). This exists so the actual
   # publish steps are reviewable and ready to flip on later, not so it runs.
   #
+  # Publish step mirrors @meonode/ui's own release workflow's approach: npm
+  # OIDC trusted publishing (`id-token: write` permission + setup-node's
+  # `registry-url` + `npm audit signatures`), not a long-lived `NPM_TOKEN`
+  # secret — see
+  # https://github.com/l7aromeo/meonode-ui/blob/main/.github/workflows/release.yml
+  #
   # To actually enable this job:
   #   1. Remove the `if: false` gate below (the `workflow_dispatch`-only
   #      trigger on its own is not considered a sufficient safeguard against
   #      accidental runs, hence the extra explicit gate).
-  #   2. TODO: add an `NPM_TOKEN` repo secret (an npm automation/publish token
-  #      for the `@meonode` org) and reference it below as `NODE_AUTH_TOKEN`.
+  #   2. TODO: configure npm OIDC trusted publishing for the `@meonode` org/
+  #      package on npmjs.com (Settings > Publishing access > add this repo +
+  #      workflow as a trusted publisher). No repo secret is needed —
+  #      `id-token: write` below is sufficient once that's configured.
   #   3. TODO: decide on a real versioning story (manual bump vs.
   #      semantic-release) before the first publish — `npm/package.json` is
   #      currently pinned to the placeholder `0.0.0-dev.0`.
@@ -143,8 +187,10 @@ jobs:
   #      explicit version decision.
   release:
     runs-on: ubuntu-latest
-    if: false # TODO: remove once NPM_TOKEN is configured and publishing is intentionally enabled
+    if: false # TODO: remove once npm OIDC trusted publishing is configured and publishing is intentionally enabled
     needs: [test, wasm-smoke]
+    permissions:
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -166,17 +212,20 @@ jobs:
       - name: Build wasm32-wasip1 plugin (release) + copy README into npm/
         run: bun run build:wasm
 
-      - name: Set up Node for npm publish
+      - name: Set up Node for npm publish (OIDC trusted publishing)
         uses: actions/setup-node@v4
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
-      # TODO: requires the NPM_TOKEN secret referenced above. `--access
-      # public` is required the first time a new scoped package is
-      # published; harmless on subsequent publishes.
+      - name: Verify provenance attestations
+        run: npm audit signatures
+
+      # No NODE_AUTH_TOKEN / NPM_TOKEN: npm OIDC trusted publishing
+      # authenticates via the `id-token: write` permission above plus the
+      # registry-url configured by setup-node, no long-lived npm token
+      # secret needed. `--access public` is required the first time a new
+      # scoped package is published; harmless on subsequent publishes.
       - name: npm publish (from npm/)
         working-directory: npm
         run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
