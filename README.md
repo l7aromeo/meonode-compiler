@@ -35,7 +35,10 @@ Div({
 `@meonode/ui`'s runtime fast path (**requires `@meonode/ui@1.7.0` or later**,
 which understands the schema 2 marker contract) detects the `__meo$` marker and
 uses the namespaced buckets directly instead of re-deriving them, skipping the
-classification and hashing pass entirely.
+classification and hashing pass entirely. **1.7.1 or later is recommended** — it
+made the runtime's theme-token conversion allocation-free for token-free props,
+which is exactly the shape this plugin produces, and roughly doubles the
+end-to-end gain (see [measured effect](#measured-effect)).
 
 Note the `padding` value above: alongside partitioning, the plugin also resolves
 `theme.*` token strings to `var(--meonode-theme-*)` at build time. `@meonode/ui`
@@ -53,16 +56,31 @@ Two numbers, because they answer different questions:
 | Benchmark | Result |
 | --- | --- |
 | Node construction in isolation (`@meonode/ui`'s own suite) | **1.66x faster** |
-| End-to-end SSR, 156-node tree, production React/Emotion (`e2e/bench-theme-tokens.mjs`) | **15.2% faster** |
+| End-to-end SSR, 156-node tree, production React/Emotion (`e2e/bench-theme-tokens.mjs`) | **25.5% faster** |
 
 The 1.66x figure covers only prop classification plus stable-key hashing, with
 React, Emotion and theme resolution excluded; it is not what a page render
-improves by. The end-to-end figure is, and it splits as:
+improves by. The end-to-end figure is.
+
+The end-to-end number depends on which `@meonode/ui` you run, because 1.7.1 made
+the runtime's theme-token conversion cheap *when there is nothing to convert*.
+Compiled output is precisely that case, so 1.7.1 widened the gap rather than
+closing it:
 
 ```text
-partitioning only:              1.4305 -> 1.3124 ms/render    8.3% faster
-partitioning + theme rewrite:   1.5426 -> 1.3084 ms/render   15.2% faster
+against @meonode/ui 1.7.0
+  partitioning only:              1.4305 -> 1.3124 ms/render    8.3% faster
+  partitioning + theme rewrite:   1.5426 -> 1.3084 ms/render   15.2% faster
+
+against @meonode/ui 1.7.1
+  partitioning only:              1.0679 -> 0.9394 ms/render   12.0% faster
+  partitioning + theme rewrite:   1.2816 -> 0.9544 ms/render   25.5% faster
 ```
+
+Under 1.7.1 the compiled timings are ~0.94 ms in both modes — compiled props are
+token-free either way — while the *uncompiled* timings differ by 0.21 ms. That
+gap is the props walk only uncompiled call sites still pay, and the theme rewrite
+is what moves a call site off it.
 
 Token density matters — the benchmark uses the `@meonode/ui` docs site's real
 density of ~0.8 token strings per compiled call site, and an earlier run at 7
