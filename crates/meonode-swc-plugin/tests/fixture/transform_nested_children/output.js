@@ -1,30 +1,30 @@
 import { Div, P } from "@meonode/ui";
 Div({
-    __meo$: 1,
-    c: {
+    __meo$: 2,
+    __meo$c: {
         padding: "20px"
     },
-    d: {
+    __meo$d: {
         onClick: h
     },
-    k: "m2husn27zwf1p9",
-    dyn: [
+    __meo$k: "m2husn27zwf1p9",
+    __meo$dyn: [
         "onClick"
     ],
     children: [
         Div({
-            __meo$: 1,
-            c: {
+            __meo$: 2,
+            __meo$c: {
                 color: "red"
             },
-            k: "m2vifli2mudr2g"
+            __meo$k: "m2vifli2mudr2g"
         }),
         P("x", {
-            __meo$: 1,
-            c: {
+            __meo$: 2,
+            __meo$c: {
                 color: "blue"
             },
-            k: "m1b90fgc86j7oo"
+            __meo$k: "m1b90fgc86j7oo"
         })
     ]
 });

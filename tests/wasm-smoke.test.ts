@@ -111,7 +111,9 @@ describe('wasm artifact smoke (@swc/core loading meonode_swc_plugin.wasm)', () =
     );
 
     // Both the outer and the nested Div call site should be rewritten.
-    const markerCount = (code.match(/__meo\$/g) ?? []).length;
+    // Count the schema marker itself (`__meo$:`), not every `__meo$`-prefixed
+    // bucket key — schema 2 names all buckets with that prefix.
+    const markerCount = (code.match(/__meo\$:/g) ?? []).length;
     expect(markerCount).toBe(2);
   });
 
@@ -151,14 +153,14 @@ describe('wasm artifact smoke (@swc/core loading meonode_swc_plugin.wasm)', () =
       expect(code).toMatchInlineSnapshot(`
         "import { Div } from '@meonode/ui';
         export const x = Div({
-            __meo$: 1,
-            c: {
+            __meo$: 2,
+            __meo$c: {
                 padding: '20px'
             },
-            d: {
+            __meo$d: {
                 id: 'a'
             },
-            k: "m1j2i941a490nl"
+            __meo$k: "m1j2i941a490nl"
         });
         "
       `);
@@ -172,16 +174,16 @@ describe('wasm artifact smoke (@swc/core loading meonode_swc_plugin.wasm)', () =
       expect(code).toMatchInlineSnapshot(`
         "import { Div } from '@meonode/ui';
         Div({
-            __meo$: 1,
-            c: {
+            __meo$: 2,
+            __meo$c: {
                 width,
                 color: someColor
             },
-            d: {
+            __meo$d: {
                 onClick: ()=>{}
             },
-            k: "m3ohe2cbdqutli",
-            dyn: [
+            __meo$k: "m3ohe2cbdqutli",
+            __meo$dyn: [
                 "width",
                 "onClick",
                 "color"
@@ -200,9 +202,9 @@ describe('wasm artifact smoke (@swc/core loading meonode_swc_plugin.wasm)', () =
         "import { Div } from '@meonode/ui';
         const rest = {};
         Div({
-            __meo$: 1,
+            __meo$: 2,
             ...rest,
-            c: {
+            __meo$c: {
                 padding: 1
             }
         });

@@ -1,12 +1,12 @@
 import { Div } from "@meonode/ui";
 Div({
-    __meo$: 1,
-    c: {
+    __meo$: 2,
+    __meo$c: {
         padding: "4px"
     },
-    d: {
+    __meo$d: {
         "data-parallax": "true",
         "aria-label": "hi"
     },
-    k: "m15osayamcz840"
+    __meo$k: "m15osayamcz840"
 });

@@ -1,14 +1,14 @@
 import { Div } from "@meonode/ui";
 Div({
-    __meo$: 1,
-    c: {
+    __meo$: 2,
+    __meo$c: {
         padding: g()
     },
-    d: {
+    __meo$d: {
         onClick: f()
     },
-    k: "m3vacyg7qmhf8",
-    dyn: [
+    __meo$k: "m3vacyg7qmhf8",
+    __meo$dyn: [
         "padding",
         "onClick"
     ]

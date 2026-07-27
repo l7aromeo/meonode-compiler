@@ -582,8 +582,13 @@ fn validate_object(obj: &ObjectLit) -> Option<BailReason> {
         .any(|p| matches!(p, PropOrSpread::Spread(_)));
 
     let mut seen_static_prop = false;
-    // (rank, is_effectful) per prop/spread, in source order.
-    let mut items: Vec<(EmitRank, bool)> = Vec::with_capacity(obj.props.len());
+    // (rank, is_effectful, is_reorderable) per prop/spread, in source order.
+    // `is_reorderable` marks values that are inert under any reordering, i.e.
+    // static literals. Non-static values are NOT reorderable even when they are
+    // effect-free: an identifier read causes no side effect but can still be
+    // *affected* by one, so moving it across an effectful value can change the
+    // value read (see the ordering check below).
+    let mut items: Vec<(EmitRank, bool, bool)> = Vec::with_capacity(obj.props.len());
 
     for prop_or_spread in obj.props.iter() {
         match prop_or_spread {
@@ -591,7 +596,7 @@ fn validate_object(obj: &ObjectLit) -> Option<BailReason> {
                 if seen_static_prop {
                     return Some(BailReason::TrailingSpread);
                 }
-                items.push((EmitRank::Spread, !is_effect_free(&spread.expr)));
+                items.push((EmitRank::Spread, !is_effect_free(&spread.expr), false));
             }
             PropOrSpread::Prop(prop) => {
                 seen_static_prop = true;
@@ -601,7 +606,7 @@ fn validate_object(obj: &ObjectLit) -> Option<BailReason> {
                     // never a static literal.
                     Prop::Shorthand(ident) => {
                         let rank = rank_for_prop(ident.sym.as_ref(), false, has_spread);
-                        items.push((rank, false));
+                        items.push((rank, false, false));
                     }
                     Prop::KeyValue(kv) => {
                         if let Some(reason) = validate_key(&kv.key) {
@@ -610,7 +615,7 @@ fn validate_object(obj: &ObjectLit) -> Option<BailReason> {
                         let name = key_name_atom(&kv.key);
                         let is_static = is_static_literal(&kv.value);
                         let rank = rank_for_prop(name.as_ref(), is_static, has_spread);
-                        items.push((rank, !is_effect_free(&kv.value)));
+                        items.push((rank, !is_effect_free(&kv.value), is_static));
                     }
                     Prop::Getter(_) | Prop::Setter(_) => {
                         return Some(BailReason::GetterSetterProp);
@@ -622,11 +627,20 @@ fn validate_object(obj: &ObjectLit) -> Option<BailReason> {
         }
     }
 
-    let effectful_ranks = items
-        .into_iter()
-        .filter_map(|(rank, effectful)| effectful.then_some(rank));
-    if !order_preserved(effectful_ranks) {
-        return Some(BailReason::EffectfulReorder);
+    // Reordering is only observable when at least one value has a side effect:
+    // with no effectful value present, every value is a pure read and their
+    // relative order cannot be detected. Once one effectful value exists, it may
+    // mutate state that any *non-static* value reads, so the order of all
+    // non-static values -- not merely the effectful ones -- must be preserved.
+    // Static literals stay genuinely inert and may be repartitioned freely.
+    if items.iter().any(|(_, effectful, _)| *effectful) {
+        let ordered_ranks = items
+            .iter()
+            .filter(|(_, _, reorderable)| !*reorderable)
+            .map(|(rank, _, _)| *rank);
+        if !order_preserved(ordered_ranks) {
+            return Some(BailReason::EffectfulReorder);
+        }
     }
 
     None
@@ -729,6 +743,79 @@ mod tests {
     /// swc plugin host does before invoking the plugin), then runs detection
     /// with the default (empty `factoryModules`) config and returns the
     /// recorded [`Decision`]s in traversal order.
+    /// Regression: an effect-FREE value is not necessarily value-STABLE.
+    /// `flag` is a plain identifier read (no side effect of its own), but an
+    /// effectful sibling can mutate the binding it reads, so moving it across
+    /// that sibling changes the observed value:
+    ///   let flag = 'A'; const bump = () => { flag = 'B'; return '9px' }
+    ///   Div({ 'data-flag': flag, padding: bump() })
+    /// `data-flag` ranks Data, `padding` ranks Css, so emission would run
+    /// `bump()` before reading `flag` -> "A" becomes "B".
+    #[test]
+    fn effect_free_but_mutable_read_reordered_across_effectful_bails() {
+        let src = r#"
+            import { Div } from '@meonode/ui'
+            Div({ 'data-flag': flag, padding: bump() })
+        "#;
+        assert_eq!(
+            decisions_for(src),
+            vec![Decision::Bail(BailReason::EffectfulReorder)]
+        );
+    }
+
+    /// Same hazard with a `Special`-ranked reader instead of a `Data`-ranked one.
+    #[test]
+    fn special_ranked_read_reordered_across_effectful_bails() {
+        let src = r#"
+            import { Div } from '@meonode/ui'
+            Div({ children: label, padding: bump() })
+        "#;
+        assert_eq!(
+            decisions_for(src),
+            vec![Decision::Bail(BailReason::EffectfulReorder)]
+        );
+    }
+
+    /// The relaxation must still hold for its motivating cases: a single
+    /// non-static value alongside only static literals is trivially ordered.
+    #[test]
+    fn key_member_expr_with_static_siblings_still_compiles() {
+        let src = r#"
+            import { Row } from '@meonode/ui'
+            Row({ key: b.label, alignItems: 'center', gap: 8 })
+        "#;
+        assert_eq!(
+            decisions_for(src),
+            vec![Decision::Compilable { props_arg_idx: 0 }]
+        );
+    }
+
+    #[test]
+    fn dynamic_css_value_with_static_siblings_still_compiles() {
+        let src = r#"
+            import { Div } from '@meonode/ui'
+            Div({ width: 8, backgroundColor: b.color, borderRadius: '50%' })
+        "#;
+        assert_eq!(
+            decisions_for(src),
+            vec![Decision::Compilable { props_arg_idx: 0 }]
+        );
+    }
+
+    /// With no effectful value present at all, pure reads may be reordered
+    /// freely -- nothing can observe the difference.
+    #[test]
+    fn multiple_pure_reads_without_effectful_value_compiles() {
+        let src = r#"
+            import { Div } from '@meonode/ui'
+            Div({ id: someId, padding: somePadding, color: someColor })
+        "#;
+        assert_eq!(
+            decisions_for(src),
+            vec![Decision::Compilable { props_arg_idx: 0 }]
+        );
+    }
+
     fn decisions_for(src: &str) -> Vec<Decision> {
         decisions_for_with_config(src, &CompileConfig::default())
     }

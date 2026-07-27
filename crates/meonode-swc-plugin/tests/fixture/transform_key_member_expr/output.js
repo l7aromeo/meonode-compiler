@@ -1,9 +1,9 @@
 import { Div } from "@meonode/ui";
 Div({
-    __meo$: 1,
-    c: {
+    __meo$: 2,
+    __meo$c: {
         padding: "4px"
     },
-    k: "m3vioa3o7peob",
+    __meo$k: "m3vioa3o7peob",
     key: item.id
 });

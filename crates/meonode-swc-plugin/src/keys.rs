@@ -53,6 +53,18 @@ pub fn key_name_atom(key: &PropName) -> Atom {
     }
 }
 
+/// Special keys that are still visible to `BaseNode._getStableKey`, and so may
+/// legitimately be named in `dyn`.
+///
+/// `ref` and `children` are destructured off in the `BaseNode` constructor, and
+/// `key` in `_getStableKey` itself, before the marker props are ever inspected.
+/// Naming any of those three in `dyn` would make it unresolvable at runtime —
+/// tripping the debug "dyn names prop X but it isn't present" warning and
+/// hashing `undefined` instead of a real value.
+pub fn is_stable_key_visible_special(name: &str) -> bool {
+    matches!(name, "css" | "props" | "as" | "theme" | "disableEmotion")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

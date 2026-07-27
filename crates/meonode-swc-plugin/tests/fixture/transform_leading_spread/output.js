@@ -4,9 +4,9 @@ const extra = {
     id: "spread-target"
 };
 Div({
-    __meo$: 1,
+    __meo$: 2,
     ...extra,
-    c: {
+    __meo$c: {
         backgroundColor: "yellow"
     }
 });

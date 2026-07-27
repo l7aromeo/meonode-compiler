@@ -35,9 +35,19 @@ use crate::config::CompileConfig;
 use crate::css_props::is_css_prop;
 use crate::detect::{self, Decision};
 use crate::effect::is_static_literal;
-use crate::keys::{is_special_key, key_name_atom};
+use crate::keys::{is_special_key, is_stable_key_visible_special, key_name_atom};
 
 const MARKER_KEY: &str = "__meo$";
+/// Schema version emitted by this compiler. Schema 1 named its buckets `c`/`d`/
+/// `k`/`dyn` at the top level, which collides with real props once spreads are
+/// left in place -- `d` is a valid SVG `<path>` attribute, so a spread carrying
+/// it would be consumed by the runtime as the DOM bucket. Schema 2 namespaces
+/// every bucket under the marker prefix, making collision impossible.
+const MARKER_SCHEMA: f64 = 2.0;
+const BUCKET_CSS_KEY: &str = "__meo$c";
+const BUCKET_DOM_KEY: &str = "__meo$d";
+const BUCKET_SITE_KEY: &str = "__meo$k";
+const BUCKET_DYN_KEY: &str = "__meo$dyn";
 
 /// FNV-1a 64-bit hash (the standard offset basis / prime for the 64-bit
 /// variant). Chosen over a crate dependency since it's a handful of lines and
@@ -98,7 +108,7 @@ fn marker_prop() -> PropOrSpread {
         MARKER_KEY,
         Expr::Lit(Lit::Num(Number {
             span: swc_core::common::DUMMY_SP,
-            value: 1.0,
+            value: MARKER_SCHEMA,
             raw: None,
         })),
     )
@@ -116,7 +126,7 @@ fn bucket_prop(name: &str, props: Vec<PropOrSpread>) -> PropOrSpread {
 
 fn key_prop(filename: &str, span: Span) -> PropOrSpread {
     kv_prop(
-        "k",
+        BUCKET_SITE_KEY,
         Expr::Lit(Lit::Str(Str::from(Atom::from(call_site_key(
             filename, span,
         ))))),
@@ -134,7 +144,7 @@ fn dyn_prop(names: Vec<Atom>) -> PropOrSpread {
         })
         .collect();
     kv_prop(
-        "dyn",
+        BUCKET_DYN_KEY,
         Expr::Array(ArrayLit {
             span: swc_core::common::DUMMY_SP,
             elems,
@@ -255,6 +265,13 @@ fn rewrite_object(obj: &mut ObjectLit, filename: &str, span: Span) {
             Prop::Shorthand(ident) => {
                 let name = ident.sym.clone();
                 if is_special_key(name.as_ref()) {
+                    // Special keys stay top-level, but a shorthand's value is an
+                    // identifier read -- always dynamic -- so its name must still
+                    // enter `dyn` or the stable key would never see it change.
+                    // The runtime resolves `dyn` names via c -> d -> top-level.
+                    if !has_spread && is_stable_key_visible_special(name.as_ref()) {
+                        push_dyn_name(&mut dyn_names, name.clone());
+                    }
                     special_props.push(PropOrSpread::Prop(prop));
                     continue;
                 }
@@ -275,6 +292,19 @@ fn rewrite_object(obj: &mut ObjectLit, filename: &str, span: Span) {
             Prop::KeyValue(kv) => {
                 let name = key_name_atom(&kv.key);
                 if is_special_key(name.as_ref()) {
+                    // Special keys stay top-level and are never bucketed, but a
+                    // *dynamic* special value (e.g. `css: computeCss()`) still has
+                    // to enter `dyn`: on the non-spread path `k` is emitted, so
+                    // `dyn` is the only thing making the stable key value-sensitive.
+                    // Without this a changing `css`/`theme` value would keep a
+                    // stale cached element. The runtime resolves `dyn` names via
+                    // c -> d -> top-level, which covers these.
+                    if !has_spread
+                        && !is_static_literal(&kv.value)
+                        && is_stable_key_visible_special(name.as_ref())
+                    {
+                        push_dyn_name(&mut dyn_names, name.clone());
+                    }
                     special_props.push(PropOrSpread::Prop(prop));
                     continue;
                 }
@@ -314,10 +344,10 @@ fn rewrite_object(obj: &mut ObjectLit, filename: &str, span: Span) {
     new_props.push(marker_prop());
     new_props.extend(leading);
     if !c_props.is_empty() {
-        new_props.push(bucket_prop("c", c_props));
+        new_props.push(bucket_prop(BUCKET_CSS_KEY, c_props));
     }
     if !d_props.is_empty() {
-        new_props.push(bucket_prop("d", d_props));
+        new_props.push(bucket_prop(BUCKET_DOM_KEY, d_props));
     }
     if !has_spread {
         new_props.push(key_prop(filename, span));
@@ -524,7 +554,7 @@ mod tests {
     }
 
     fn dyn_names(obj: &ObjectLit) -> Vec<String> {
-        let Expr::Array(arr) = find_prop(obj, "dyn") else {
+        let Expr::Array(arr) = find_prop(obj, "__meo$dyn") else {
             panic!("expected `dyn` to be an array literal");
         };
         arr.elems
@@ -559,8 +589,8 @@ mod tests {
         let obj1 = transformed_object(src, "same.tsx");
         let obj2 = transformed_object(src, "same.tsx");
         assert_eq!(
-            str_lit_value(find_prop(&obj1, "k")),
-            str_lit_value(find_prop(&obj2, "k"))
+            str_lit_value(find_prop(&obj1, "__meo$k")),
+            str_lit_value(find_prop(&obj2, "__meo$k"))
         );
     }
 
@@ -576,8 +606,8 @@ mod tests {
         );
         assert_eq!(objs.len(), 2);
         assert_ne!(
-            str_lit_value(find_prop(&objs[0], "k")),
-            str_lit_value(find_prop(&objs[1], "k"))
+            str_lit_value(find_prop(&objs[0], "__meo$k")),
+            str_lit_value(find_prop(&objs[1], "__meo$k"))
         );
     }
 
@@ -590,8 +620,8 @@ mod tests {
         let obj1 = transformed_object(src, "a.tsx");
         let obj2 = transformed_object(src, "b.tsx");
         assert_ne!(
-            str_lit_value(find_prop(&obj1, "k")),
-            str_lit_value(find_prop(&obj2, "k"))
+            str_lit_value(find_prop(&obj1, "__meo$k")),
+            str_lit_value(find_prop(&obj2, "__meo$k"))
         );
     }
 
@@ -608,14 +638,14 @@ mod tests {
         assert!(!is_css_prop("onClick"));
         assert!(!is_css_prop("id"));
 
-        let Expr::Object(c) = find_prop(&obj, "c") else {
+        let Expr::Object(c) = find_prop(&obj, "__meo$c") else {
             panic!("expected `c` to be an object literal");
         };
         assert!(has_prop(c, "backgroundColor"));
         assert!(!has_prop(c, "onClick"));
         assert!(!has_prop(c, "id"));
 
-        let Expr::Object(d) = find_prop(&obj, "d") else {
+        let Expr::Object(d) = find_prop(&obj, "__meo$d") else {
             panic!("expected `d` to be an object literal");
         };
         assert!(has_prop(d, "onClick"));
@@ -632,8 +662,8 @@ mod tests {
             "#,
             "test.tsx",
         );
-        assert!(!has_prop(&obj, "c"));
-        assert!(has_prop(&obj, "d"));
+        assert!(!has_prop(&obj, "__meo$c"));
+        assert!(has_prop(&obj, "__meo$d"));
     }
 
     #[test]
@@ -645,7 +675,7 @@ mod tests {
             "#,
             "test.tsx",
         );
-        assert!(!has_prop(&obj, "dyn"));
+        assert!(!has_prop(&obj, "__meo$dyn"));
     }
 
     #[test]
@@ -678,7 +708,15 @@ mod tests {
         // at the tail, after __meo$/c/d/k/dyn.
         assert_eq!(
             order,
-            vec!["__meo$", "c", "d", "k", "dyn", "children", "css"]
+            vec![
+                "__meo$",
+                "__meo$c",
+                "__meo$d",
+                "__meo$k",
+                "__meo$dyn",
+                "children",
+                "css"
+            ]
         );
     }
 
@@ -710,7 +748,11 @@ mod tests {
                     return None;
                 };
                 let name = id.sym.as_ref();
-                (name != "__meo$" && name != "c" && name != "d" && name != "k" && name != "dyn")
+                (name != "__meo$"
+                    && name != "__meo$c"
+                    && name != "__meo$d"
+                    && name != "__meo$k"
+                    && name != "__meo$dyn")
                     .then(|| name.to_string())
             })
             .collect();
@@ -804,7 +846,7 @@ mod tests {
         let outer = &objs[0];
         assert!(has_prop(outer, "__meo$"));
 
-        let Expr::Object(d) = find_prop(outer, "d") else {
+        let Expr::Object(d) = find_prop(outer, "__meo$d") else {
             panic!("expected `d` bucket to exist");
         };
         let Expr::Arrow(arrow) = find_prop(d, "onClick") else {
@@ -871,7 +913,7 @@ mod tests {
         };
         assert_eq!(ident.sym.as_ref(), "extra");
 
-        let Expr::Object(c) = find_prop(&obj, "c") else {
+        let Expr::Object(c) = find_prop(&obj, "__meo$c") else {
             panic!("expected `c` bucket to exist");
         };
         assert!(has_prop(c, "padding"));
@@ -913,11 +955,11 @@ mod tests {
             "#,
             "test.tsx",
         );
-        assert!(!has_prop(&obj, "c"));
-        assert!(!has_prop(&obj, "d"));
-        assert!(!has_prop(&obj, "dyn"));
+        assert!(!has_prop(&obj, "__meo$c"));
+        assert!(!has_prop(&obj, "__meo$d"));
+        assert!(!has_prop(&obj, "__meo$dyn"));
         assert!(
-            !has_prop(&obj, "k"),
+            !has_prop(&obj, "__meo$k"),
             "k must never be emitted when a spread is present — see the \
              stable-key hazard doc comment on rewrite_object"
         );
@@ -947,14 +989,14 @@ mod tests {
             "#,
             "test.tsx",
         );
-        assert!(!has_prop(&obj, "k"));
-        assert!(!has_prop(&obj, "dyn"));
+        assert!(!has_prop(&obj, "__meo$k"));
+        assert!(!has_prop(&obj, "__meo$dyn"));
         // Bucketing for the static props is still fully retained.
-        let Expr::Object(c) = find_prop(&obj, "c") else {
+        let Expr::Object(c) = find_prop(&obj, "__meo$c") else {
             panic!("expected `c` bucket to exist");
         };
         assert!(has_prop(c, "padding"));
-        let Expr::Object(d) = find_prop(&obj, "d") else {
+        let Expr::Object(d) = find_prop(&obj, "__meo$d") else {
             panic!("expected `d` bucket to exist");
         };
         assert!(has_prop(d, "id"));
@@ -978,16 +1020,16 @@ mod tests {
             "#,
             "test.tsx",
         );
-        assert!(!has_prop(&obj, "k"));
-        assert!(!has_prop(&obj, "dyn"));
+        assert!(!has_prop(&obj, "__meo$k"));
+        assert!(!has_prop(&obj, "__meo$dyn"));
 
-        let Expr::Object(c) = find_prop(&obj, "c") else {
+        let Expr::Object(c) = find_prop(&obj, "__meo$c") else {
             panic!("expected `c` bucket to exist");
         };
         assert!(has_prop(c, "padding"));
         // `onClick` must NOT be in `d` (or `c`) — it must stay flat instead.
         assert!(
-            !has_prop(&obj, "d"),
+            !has_prop(&obj, "__meo$d"),
             "onClick is the only would-be-`d` candidate and must stay flat, \
              so `d` shouldn't be emitted at all"
         );
@@ -1027,8 +1069,8 @@ mod tests {
             "#,
             "test.tsx",
         );
-        assert!(!has_prop(&obj, "k"));
-        assert!(!has_prop(&obj, "dyn"));
+        assert!(!has_prop(&obj, "__meo$k"));
+        assert!(!has_prop(&obj, "__meo$dyn"));
 
         // Leading group (everything before `c`): spread `a`, spread `b`,
         // `onClick`, in that exact source order.
@@ -1054,7 +1096,7 @@ mod tests {
             .collect();
         assert_eq!(leading_kinds, vec!["...a", "...b", "onClick"]);
 
-        let Expr::Object(c) = find_prop(&obj, "c") else {
+        let Expr::Object(c) = find_prop(&obj, "__meo$c") else {
             panic!("expected `c` bucket to exist");
         };
         assert!(has_prop(c, "padding"));
@@ -1071,7 +1113,7 @@ mod tests {
             "#,
             "test.tsx",
         );
-        let Expr::Object(d) = find_prop(&obj, "d") else {
+        let Expr::Object(d) = find_prop(&obj, "__meo$d") else {
             panic!("expected `d` bucket to exist");
         };
         let found = d.props.iter().any(|p| {
@@ -1107,7 +1149,7 @@ mod tests {
         assert_eq!(objs.len(), 1);
         let obj = objs.remove(0);
         assert!(has_prop(&obj, "__meo$"));
-        let Expr::Object(c) = find_prop(&obj, "c") else {
+        let Expr::Object(c) = find_prop(&obj, "__meo$c") else {
             panic!("expected `c` bucket to exist");
         };
         assert!(has_prop(c, "padding"));

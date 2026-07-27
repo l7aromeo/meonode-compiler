@@ -1,14 +1,14 @@
 import { Button } from "@meonode/mui";
 Button({
-    __meo$: 1,
-    c: {
+    __meo$: 2,
+    __meo$c: {
         padding: "8px"
     },
-    d: {
+    __meo$d: {
         onClick: handler
     },
-    k: "m3jxgsnlaytknc",
-    dyn: [
+    __meo$k: "m3jxgsnlaytknc",
+    __meo$dyn: [
         "onClick"
     ]
 });

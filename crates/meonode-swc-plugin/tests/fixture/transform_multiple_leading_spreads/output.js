@@ -6,10 +6,10 @@ const b = {
     color: "red"
 };
 Div({
-    __meo$: 1,
+    __meo$: 2,
     ...a,
     ...b,
-    d: {
+    __meo$d: {
         id: "x"
     }
 });

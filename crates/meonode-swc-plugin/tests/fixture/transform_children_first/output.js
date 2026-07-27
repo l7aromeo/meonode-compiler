@@ -1,8 +1,8 @@
 import { P } from "@meonode/ui";
 P("text", {
-    __meo$: 1,
-    c: {
+    __meo$: 2,
+    __meo$c: {
         color: "red"
     },
-    k: "m13zydhbejq0rn"
+    __meo$k: "m13zydhbejq0rn"
 });

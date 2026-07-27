@@ -1,14 +1,14 @@
 import { Div } from "@meonode/ui";
 Div({
-    __meo$: 1,
-    c: {
+    __meo$: 2,
+    __meo$c: {
         padding: "1px"
     },
-    d: {
+    __meo$d: {
         x: a.b
     },
-    k: "m3va8a2wslt8w",
-    dyn: [
+    __meo$k: "m3va8a2wslt8w",
+    __meo$dyn: [
         "x"
     ]
 });

@@ -1,12 +1,12 @@
 import { Div } from "@meonode/ui";
 Div({
-    __meo$: 1,
-    c: {
+    __meo$: 2,
+    __meo$c: {
         padding: "10px",
         width: 20
     },
-    d: {
+    __meo$d: {
         id: "box"
     },
-    k: "m3vsgzz0n5zxp"
+    __meo$k: "m3vsgzz0n5zxp"
 });

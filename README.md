@@ -22,20 +22,18 @@ Div({ padding: '20px', width, onClick: handler, css: { color: 'red' }, children:
 
 // Compiled:
 Div({
-  __meo$: 1,
-  c: { padding: '20px', width },
-  d: { onClick: handler },
-  k: 'm1a2b3c',
-  dyn: ['width', 'onClick'],
+  __meo$: 2,
+  __meo$c: { padding: '20px', width },
+  __meo$d: { onClick: handler },
+  __meo$k: 'm1a2b3c',
+  __meo$dyn: ['width', 'onClick'],
   css: { color: 'red' },
   children: [A, B],
 })
 ```
 
-`@meonode/ui`'s runtime fast path (Phase 1 of this project — **requires a
-`@meonode/ui` build with compiler runtime support**; at the time of writing
-this has landed on an unreleased branch, not yet in a tagged `@meonode/ui`
-release) detects the `__meo$` marker and uses `c`/`d`/`k`/`dyn` directly
+`@meonode/ui`'s runtime fast path (**requires `@meonode/ui@1.7.0-beta.2` or
+later**, which understands the schema 2 marker contract) detects the `__meo$` marker and uses the namespaced buckets directly
 instead of re-deriving them, skipping the classification and hashing pass
 entirely. Measured on `@meonode/ui`'s own benchmark suite, the compiled path
 constructs nodes **1.66x faster** than the uncompiled runtime-classification
@@ -154,9 +152,9 @@ how either is evaluated relative to the rest of the call.
 
 ### Spread-bearing call sites: prop partitioning, but not call-site keying
 
-A leading spread's contents aren't known until compile time, so a spread-
+A leading spread's contents aren't known until runtime, so a spread-
 bearing call site gets **prop partitioning but not call-site keying**: the
-`__meo$` marker, the spread itself, and `c`/`d` buckets for whatever's
+`__meo$` marker, the spread itself, and `__meo$c`/`__meo$d` buckets for whatever's
 statically known are all still emitted (the classification speedup is fully
 retained for those), but **`k` and `dyn` are never emitted at all** when a
 spread is present.
@@ -196,13 +194,13 @@ uncompiled code:
 // Source:
 Div({ ...props, onClick: handler, padding: '8px' })
 
-// Compiled: `padding` (static) buckets into `c`; `onClick` (dynamic) stays
-// flat, right alongside the spread. No `k`, no `dyn`.
+// Compiled: `padding` (static) buckets into `__meo$c`; `onClick` (dynamic)
+// stays flat, right alongside the spread. No `__meo$k`, no `__meo$dyn`.
 Div({
-  __meo$: 1,
+  __meo$: 2,
   ...props,
   onClick: handler,
-  c: { padding: '8px' },
+  __meo$c: { padding: '8px' },
 })
 ```
 
@@ -229,7 +227,16 @@ Every capitalized named import from a listed module (e.g. `Button`,
 `@meonode/ui` HTML factory. Lowercase named imports (helper functions, e.g.
 `createMuiNode`, `isProbablyMuiTheme`) are always ignored. Namespace imports
 from a listed module still bail (`NamespaceImport`), same as `@meonode/ui`'s.
-Misidentification degrades to a bail, never a rewrite: a non-object-literal
+Only list modules whose capitalized exports are *all* props-at-arg-0 factories.
+The plugin cannot verify that a capitalized export really is a meonode factory
+— it has no cross-module resolution — so a capitalized export that merely takes
+an object as its first argument (a plain function component called directly, a
+config helper, a `Provider`-style wrapper) **will** have its argument rewritten
+into marker props. Children-first factories in a listed module are likewise
+unsafe: bindings from `factoryModules` are always treated as props-at-arg-0.
+Capitalized *default* imports are ignored entirely.
+
+A non-object-literal
 first argument is never touched. A missing or malformed `factoryModules`
 config is equivalent to omitting it — no extra modules are recognized, and
 the build never fails because of it.

@@ -1,15 +1,15 @@
 import { createNode } from "@meonode/ui";
 const Box = createNode("div");
 Box({
-    __meo$: 1,
-    c: {
+    __meo$: 2,
+    __meo$c: {
         padding: "1px"
     },
-    d: {
+    __meo$d: {
         onClick: handler
     },
-    k: "m1yx14tsmgtr1m",
-    dyn: [
+    __meo$k: "m1yx14tsmgtr1m",
+    __meo$dyn: [
         "onClick"
     ]
 });
