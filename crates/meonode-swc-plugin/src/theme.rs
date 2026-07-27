@@ -18,18 +18,26 @@
 //! Measured by `e2e/bench-theme-tokens.mjs`, which drives this actual plugin
 //! over a 156-node tree at the docs site's real token density (~0.8 token
 //! strings per compiled call site) under `renderToPipeableStream` with
-//! production React/Emotion builds:
+//! production React/Emotion builds.
+//!
+//! The numbers depend on which `@meonode/ui` is installed, because 1.7.1 made
+//! the runtime conversion cheap *when there is nothing to convert*. Compiled
+//! output is exactly that case, so 1.7.1 widened the gap rather than closing it:
 //!
 //! ```text
-//! partitioning only (tokens stripped):   1.4305 -> 1.3124 ms/render   8.3% faster
-//! partitioning + this rewrite:           1.5426 -> 1.3084 ms/render  15.2% faster
+//! against @meonode/ui 1.7.0
+//!   partitioning only:            1.4305 -> 1.3124 ms/render    8.3% faster
+//!   partitioning + this rewrite:  1.5426 -> 1.3084 ms/render   15.2% faster
+//!
+//! against @meonode/ui 1.7.1 (allocation-free token-free fast path)
+//!   partitioning only:            1.0679 -> 0.9394 ms/render   12.0% faster
+//!   partitioning + this rewrite:  1.2816 -> 0.9544 ms/render   25.5% faster
 //! ```
 //!
-//! So this roughly doubles the compiler's end-to-end SSR gain, adding ~7 points
-//! on top of prop partitioning's 8.3%. Note the two compiled timings are
-//! effectively identical (1.3084 vs 1.3124) while the uncompiled ones differ by
-//! 0.11 ms — that gap *is* the runtime token cost, and the rewrite recovers
-//! essentially all of it.
+//! Under 1.7.1 the compiled timings are ~0.94 ms either way (token-free
+//! whichever mode), while the *uncompiled* timings differ by 0.21 ms — that gap
+//! is the runtime walk that only uncompiled call sites still pay. This rewrite
+//! is what puts a call site on the cheap side of it.
 //!
 //! An earlier estimate of "14% incremental" came from modelling compiled output
 //! with hand-written marker props rather than running the plugin; it overstated
