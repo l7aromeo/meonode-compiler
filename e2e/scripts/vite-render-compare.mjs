@@ -89,7 +89,7 @@ if (!equal) {
 
 const entryOn = await readFile(path.join(APP_DIR, 'dist-on', 'entry.js'), 'utf8')
 const entryOff = await readFile(path.join(APP_DIR, 'dist-off', 'entry.js'), 'utf8')
-const markerRe = /__meo\$:1/
+const markerRe = /__meo\$:\d/
 const transformAppliedOn = markerRe.test(entryOn)
 const transformAppliedOff = markerRe.test(entryOff)
 

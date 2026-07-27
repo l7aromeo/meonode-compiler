@@ -302,7 +302,7 @@ bun run test:e2e        # Next Turbopack + Vite real-build parity fixtures (slow
 ```
 
 `@meonode/ui` is pinned to an exact prerelease version (currently
-`1.7.0-beta.1`, the `beta` dist-tag) in the root `package.json` and in
+`1.7.0-beta.2`, the `beta` dist-tag) in the root `package.json` and in
 `e2e/next-app`/`e2e/vite-app`'s `package.json`, rather than a semver range,
 so `bun run test` / `bun run test:e2e` stay reproducible. This repo's compiler
 runtime fast path depends on `@meonode/ui` runtime support that is still on

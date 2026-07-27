@@ -72,10 +72,10 @@ async function findChunkFiles(buildDirName) {
 // `__meo$` alone is not a sufficient marker: @meonode/ui's own runtime bundles
 // that same string as a constant it reads at render time, so it shows up in
 // client chunks regardless of whether the compiler transform ran. What only
-// the *transform* emits is the literal object property `__meo$:1` baked into
+// the *transform* emits is the literal object property `__meo$:<schema>` baked into
 // a call site's args — check for that instead (matches the guard used by
 // e2e/scripts/vite-render-compare.mjs).
-const TRANSFORM_MARKER = /__meo\$:1/
+const TRANSFORM_MARKER = /__meo\$:\d/
 
 async function countTransformMarker(buildDirName) {
   const files = await findChunkFiles(buildDirName)
