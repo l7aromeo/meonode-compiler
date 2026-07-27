@@ -43,7 +43,7 @@ use swc_core::ecma::visit::{Visit, VisitWith};
 
 use crate::config::CompileConfig;
 use crate::css_props::is_css_prop;
-use crate::effect::is_effect_free;
+use crate::effect::{is_effect_free, is_static_literal};
 use crate::factories::factory_children_first;
 use crate::keys::{is_special_key, key_name_atom};
 use crate::order::{order_preserved, EmitRank};
@@ -479,15 +479,24 @@ fn unwrap_parens(mut expr: &Expr) -> &Expr {
     expr
 }
 
-/// Returns this key's [`EmitRank`] — where partition.rs's rewrite will place
-/// a prop with this name, for the evaluation-order check in
-/// [`validate_object`]. Mirrors `partition.rs::rewrite_object`'s own
-/// bucket-assignment precedence exactly (special key wins over CSS-prop
-/// membership): the two must never diverge, or this analysis would be
-/// judging an emission shape that isn't the one actually produced.
-fn rank_for_key(name: &str) -> EmitRank {
+/// Returns this prop's [`EmitRank`] — where `partition.rs`'s rewrite will
+/// place it — for the evaluation-order check in [`validate_object`]. Mirrors
+/// `partition.rs::rewrite_object`'s own bucket-assignment precedence exactly:
+/// the two must never diverge, or this analysis would be judging an emission
+/// shape that isn't the one actually produced.
+///
+/// `has_spread` and `is_static` encode the stable-key-safety rule (see this
+/// module's doc comment on "Leading spreads and the stable-key hazard"): when
+/// the object has a leading spread, a non-special prop whose value isn't a
+/// static literal is **not** bucketed into `c`/`d` — it stays flat, at
+/// [`EmitRank::Spread`], same as the spread(s) themselves. `is_static` is
+/// irrelevant (and ignored) when `has_spread` is `false`, since bucketing is
+/// unconditional in that case.
+fn rank_for_prop(name: &str, is_static: bool, has_spread: bool) -> EmitRank {
     if is_special_key(name) {
         EmitRank::Special
+    } else if has_spread && !is_static {
+        EmitRank::Spread
     } else if is_css_prop(name) {
         EmitRank::Css
     } else {
@@ -513,6 +522,38 @@ fn rank_for_key(name: &str) -> EmitRank {
 /// doesn't bucket them), so their relative order amongst each other is
 /// preserved automatically — nothing here needs to reorder them.
 ///
+/// ## Leading spreads and the stable-key hazard
+///
+/// A spread's contents aren't known until runtime, so `@meonode/ui`'s
+/// `BaseNode._getStableKey` can never safely use the compiled marker's `k` +
+/// `dyn` fast path for a call site with a spread: `k` is a pure function of
+/// call-site *source position*, so two evaluations of the same call site
+/// with *different* spread contents would get an identical `k` — and if the
+/// node also carries a `deps` array, that identical stable key is the
+/// `elementCache` lookup key, so a stale cached element (built from the
+/// *first* evaluation's props) could be returned for the second. `k`/`dyn`
+/// are therefore never emitted at all when a spread is present (see
+/// `partition.rs::rewrite_object`); `_getStableKey` falls back to its legacy
+/// `createPropSignature` path (already covered by `@meonode/ui`'s own test:
+/// "marker without k falls back to the legacy signature path").
+///
+/// That legacy path only hashes an object-*valued* top-level prop
+/// *structurally* (by its key names, not its nested values — see
+/// `NodeUtil._serializePropValue`'s object branch) — fine for the spread's
+/// own contents (spread-contributed keys land flat at the top level, so
+/// they're hashed *by value* like any ordinary prop) but NOT fine for a
+/// prop that *would* have been safely representable via `dyn` (i.e. isn't a
+/// static literal): if such a prop got bucketed into `c`/`d` as usual, its
+/// actual value would become invisible to the legacy fallback (hidden one
+/// level deeper, behind the bucket object's own structural hash), silently
+/// re-introducing the exact same collision hazard for an ordinary dynamic
+/// prop instead of a spread. So whenever a spread is present, a non-special
+/// prop is only bucketed into `c`/`d` when its value is a static literal
+/// (`effect::is_static_literal`) — anything else stays flat at the top
+/// level (same position class as the spread itself), exactly matching where
+/// it would sit in genuinely uncompiled code, which the legacy signature
+/// path already hashes correctly. See [`rank_for_prop`].
+///
 /// ## Evaluation-order safety (v0.2 rule, Change 1)
 ///
 /// `partition.rs` reorders evaluation: every prop lands in a bucket
@@ -535,6 +576,11 @@ fn validate_object(obj: &ObjectLit) -> Option<BailReason> {
         return Some(BailReason::ExistingMarker);
     }
 
+    let has_spread = obj
+        .props
+        .iter()
+        .any(|p| matches!(p, PropOrSpread::Spread(_)));
+
     let mut seen_static_prop = false;
     // (rank, is_effectful) per prop/spread, in source order.
     let mut items: Vec<(EmitRank, bool)> = Vec::with_capacity(obj.props.len());
@@ -551,16 +597,20 @@ fn validate_object(obj: &ObjectLit) -> Option<BailReason> {
                 seen_static_prop = true;
                 match &**prop {
                     // Shorthand's implicit value is the identifier itself,
-                    // which is always effect-free (reading a binding).
+                    // which is always effect-free (reading a binding) but
+                    // never a static literal.
                     Prop::Shorthand(ident) => {
-                        items.push((rank_for_key(ident.sym.as_ref()), false));
+                        let rank = rank_for_prop(ident.sym.as_ref(), false, has_spread);
+                        items.push((rank, false));
                     }
                     Prop::KeyValue(kv) => {
                         if let Some(reason) = validate_key(&kv.key) {
                             return Some(reason);
                         }
                         let name = key_name_atom(&kv.key);
-                        items.push((rank_for_key(name.as_ref()), !is_effect_free(&kv.value)));
+                        let is_static = is_static_literal(&kv.value);
+                        let rank = rank_for_prop(name.as_ref(), is_static, has_spread);
+                        items.push((rank, !is_effect_free(&kv.value)));
                     }
                     Prop::Getter(_) | Prop::Setter(_) => {
                         return Some(BailReason::GetterSetterProp);
@@ -917,6 +967,58 @@ mod tests {
             r#"
             import { Div } from '@meonode/ui';
             Div({ ...f(), padding: '1px' });
+            "#,
+        );
+        assert_eq!(decisions, vec![Decision::Compilable { props_arg_idx: 0 }]);
+    }
+
+    // --- Stable-key hazard: spread + a non-static-literal (would-be `dyn`)
+    // prop reclassified to `EmitRank::Spread` (see `rank_for_prop`) ---
+
+    #[test]
+    fn spread_plus_two_effectful_calls_in_source_order_compiles() {
+        // `onClick: f()` gets reclassified to `EmitRank::Spread` (has_spread
+        // + non-static value), same rank as the spread itself; `children:
+        // [g()]` stays `EmitRank::Special`. Source order onClick-then-children
+        // is Spread(0) -> Special(3): non-decreasing, compiles.
+        let decisions = decisions_for(
+            r#"
+            import { Div } from '@meonode/ui';
+            Div({ ...props, onClick: f(), children: [g()] });
+            "#,
+        );
+        assert_eq!(decisions, vec![Decision::Compilable { props_arg_idx: 0 }]);
+    }
+
+    #[test]
+    fn spread_plus_reordered_effectful_calls_bails() {
+        // Same two effectful values, source order reversed: `children: [g()]`
+        // (Special, rank 3) before `onClick: f()` (reclassified to
+        // EmitRank::Spread, rank 0, because of the spread) — 3 then 0 is a
+        // genuine decrease, so this bails via `EffectfulReorder` even though
+        // both values individually look eligible.
+        let decisions = decisions_for(
+            r#"
+            import { Div } from '@meonode/ui';
+            Div({ ...props, children: [g()], onClick: f() });
+            "#,
+        );
+        assert_eq!(
+            decisions,
+            vec![Decision::Bail(BailReason::EffectfulReorder)]
+        );
+    }
+
+    #[test]
+    fn spread_plus_dynamic_but_effect_free_prop_is_fine() {
+        // `onClick: handler` is dynamic (not a static literal) but
+        // effect-free (an identifier read) — reclassified to
+        // `EmitRank::Spread` for bucketing purposes, but since it's not
+        // effectful at all, order-analysis doesn't even consider it.
+        let decisions = decisions_for(
+            r#"
+            import { Div } from '@meonode/ui';
+            Div({ ...props, onClick: handler, padding: '1px' });
             "#,
         );
         assert_eq!(decisions, vec![Decision::Compilable { props_arg_idx: 0 }]);

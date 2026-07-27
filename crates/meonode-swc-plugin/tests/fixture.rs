@@ -285,8 +285,21 @@ fn transform_children_not_last_still_compiles() {
 #[test]
 fn transform_leading_spread() {
     // Change 2: a spread preceding every static prop compiles by leaving the
-    // spread top-level and bucketing only the static props.
+    // spread top-level and bucketing only the static props. Note `k`/`dyn`
+    // are absent from the expected output — see
+    // `transform_leading_spread_with_dynamic_prop` and the stable-key-hazard
+    // doc comment on `partition::rewrite_object` for why.
     run_partition("transform_leading_spread");
+}
+
+#[test]
+fn transform_leading_spread_with_dynamic_prop() {
+    // Stable-key hazard fix: `onClick: handler` is dynamic (not a static
+    // literal) but with a spread present it must stay flat/unbucketed
+    // (never in `d`), rather than being hidden behind `d`'s
+    // structural-only hash once `k`/`dyn` are omitted. `padding` (a static
+    // literal) is unaffected and still bucketed into `c` normally.
+    run_partition("transform_leading_spread_with_dynamic_prop");
 }
 
 #[test]

@@ -142,28 +142,70 @@ fn dyn_prop(names: Vec<Atom>) -> PropOrSpread {
     )
 }
 
-/// Partitions `obj`'s props into `__meo$`/leading-spreads/`c`/`d`/`k`/`dyn`
+/// Partitions `obj`'s props into `__meo$`/leading-props/`c`/`d`/`k`/`dyn`
 /// plus any special keys, and rewrites `obj.props` in place. `span` is the
 /// *call expression's* span (not the object literal's), matching Task 9's
 /// spec for `k`.
 ///
-/// Emit order: `__meo$`, every leading `...spread` in its original relative
-/// order (Change 2 — `detect::validate_object` has already guaranteed every
-/// spread precedes every static prop, so none of this function's bucketing
-/// ever needs to reorder a spread relative to another spread), `c` (omitted
-/// if empty), `d` (omitted if empty), `k`, `dyn` (omitted if empty), then
-/// every special-key prop in its original source order. Bucket membership: a
-/// non-special key goes to `c` if `css_props::is_css_prop` recognizes it,
-/// otherwise `d`. A bucketed prop's name is added to `dyn` unless its value
-/// is a "plain literal" per `effect::is_static_literal` (shorthand props are
-/// always dynamic, since their implicit value is an identifier). A spread's
-/// own argument contributes no bucketed prop and no `dyn` name — its
-/// contents aren't known until runtime, so `@meonode/ui`'s
-/// `processProps` classifies them generically via its "passthrough" fast
-/// path (`getCSSProps`/`getDOMProps` over whatever the spread merges in),
-/// with the compiler-bucketed `c`/`d` static props applied on top —
-/// reproducing plain-JS "later key wins" semantics exactly (see the v0.2
-/// design doc's Change 2).
+/// Emit order: `__meo$`, every leading `...spread` **and** (when a spread is
+/// present) every non-static-literal non-special prop, in their combined
+/// original relative source order (see "Leading spreads and the stable-key
+/// hazard" below), `c` (omitted if empty), `d` (omitted if empty), `k` +
+/// `dyn` (both omitted entirely when a spread is present — see below,
+/// otherwise `dyn` itself is omitted if empty), then every special-key prop
+/// in its original source order.
+///
+/// Bucket membership: a non-special key goes to `c` if `css_props::is_css_prop`
+/// recognizes it, otherwise `d` — *unless* a spread is present and the value
+/// isn't a static literal (`effect::is_static_literal`), in which case it
+/// stays flat/unbucketed instead (pushed into `leading`, alongside the
+/// spread(s)). When there's no spread, every non-special prop is always
+/// bucketed as before, and its name is added to `dyn` unless its value is
+/// static (shorthand props are always dynamic, since their implicit value is
+/// an identifier).
+///
+/// ## Leading spreads and the stable-key hazard
+///
+/// A spread's own argument contributes no bucketed prop and no `dyn` name —
+/// its contents aren't known until runtime, so `@meonode/ui`'s `processProps`
+/// classifies them generically via its "passthrough" fast path
+/// (`getCSSProps`/`getDOMProps` over whatever the spread merges in), with the
+/// compiler-bucketed `c`/`d` static props applied on top — reproducing
+/// plain-JS "later key wins" semantics exactly (see the v0.2 design doc's
+/// Change 2, and this module's tests asserting `c`'s value wins).
+///
+/// But a spread's contents are equally invisible to `k`: `k` is a pure
+/// function of call-site *source position*, so it's identical across every
+/// evaluation of the same call site regardless of what the spread happens to
+/// contain that time. If `k` (and `dyn`, which is only meaningful alongside
+/// it) were still emitted, two evaluations with *different* spread contents
+/// would produce an *identical* stable key — and if the node also carries a
+/// `deps` array, `@meonode/ui`'s `elementCache` is keyed by that stable key,
+/// so a stale cached element (built from an earlier evaluation's props)
+/// could be returned instead of a fresh one reflecting the new props. So `k`
+/// and `dyn` are never emitted when a spread is present; `_getStableKey`
+/// falls back to its legacy `createPropSignature` path instead (see
+/// `@meonode/ui`'s own test: "marker without k falls back to the legacy
+/// signature path").
+///
+/// That legacy path hashes each *top-level* prop by value (primitives
+/// inline, functions via cached `toString` hash, `css` structurally via a
+/// dedicated CSS hash, arrays specially) but any other object-*valued*
+/// top-level prop only by its key *names* (see
+/// `NodeUtil._serializePropValue`'s generic object branch) — which is fine
+/// for the spread's own contents (they land as ordinary flat top-level
+/// props, hashed by value like anything else) but would silently blind the
+/// signature to a *bucketed* dynamic prop's actual value (hidden one level
+/// deeper inside `c`/`d`, which only contributes its own key names to the
+/// hash). Restricting bucketing (when a spread is present) to static-literal
+/// values only avoids this: a static literal's value never varies between
+/// evaluations of the same call site, so hiding it behind `c`/`d`'s
+/// structural hash loses no real information, while every value that
+/// *could* vary stays flat — exactly where it would sit in genuinely
+/// uncompiled code, which the legacy signature path already hashes
+/// correctly. See `detect::rank_for_prop` and `detect::validate_object`'s
+/// matching doc comment, which this function's bucketing must never diverge
+/// from.
 ///
 /// Appends `name` to `dyn_names` unless it's already there. A source object
 /// can legally repeat a key (`{ onClick: a, onClick: b }` — last one wins at
@@ -182,8 +224,15 @@ fn push_dyn_name(dyn_names: &mut Vec<Atom>, name: Atom) {
 
 fn rewrite_object(obj: &mut ObjectLit, filename: &str, span: Span) {
     let old_props = mem::take(&mut obj.props);
+    let has_spread = old_props
+        .iter()
+        .any(|p| matches!(p, PropOrSpread::Spread(_)));
 
-    let mut spreads: Vec<PropOrSpread> = Vec::new();
+    // Spreads themselves, plus (only when `has_spread`) any non-static-literal
+    // non-special prop that must stay flat for stable-key safety — see this
+    // function's doc comment. Built via a single forward scan, so their
+    // combined relative source order is preserved automatically.
+    let mut leading: Vec<PropOrSpread> = Vec::new();
     let mut c_props: Vec<PropOrSpread> = Vec::new();
     let mut d_props: Vec<PropOrSpread> = Vec::new();
     let mut special_props: Vec<PropOrSpread> = Vec::new();
@@ -194,9 +243,9 @@ fn rewrite_object(obj: &mut ObjectLit, filename: &str, span: Span) {
             // Leading spread (Change 2): `detect::validate_object` already
             // guaranteed every spread precedes every static prop, so it's
             // always safe to leave it exactly where it was — right after
-            // `__meo$` once every spread has been collected.
+            // `__meo$` once every leading prop has been collected.
             PropOrSpread::Spread(spread) => {
-                spreads.push(PropOrSpread::Spread(spread));
+                leading.push(PropOrSpread::Spread(spread));
                 continue;
             }
             PropOrSpread::Prop(prop) => prop,
@@ -209,8 +258,13 @@ fn rewrite_object(obj: &mut ObjectLit, filename: &str, span: Span) {
                     special_props.push(PropOrSpread::Prop(prop));
                     continue;
                 }
-                // Shorthand's implicit value is the identifier itself, which
-                // is always dynamic (see `effect::is_static_literal`).
+                // Shorthand's implicit value is the identifier itself: always
+                // dynamic (see `effect::is_static_literal`), so with a spread
+                // present it must stay flat rather than get bucketed.
+                if has_spread {
+                    leading.push(PropOrSpread::Prop(prop));
+                    continue;
+                }
                 push_dyn_name(&mut dyn_names, name.clone());
                 if is_css_prop(name.as_ref()) {
                     c_props.push(PropOrSpread::Prop(prop));
@@ -224,7 +278,12 @@ fn rewrite_object(obj: &mut ObjectLit, filename: &str, span: Span) {
                     special_props.push(PropOrSpread::Prop(prop));
                     continue;
                 }
-                if !is_static_literal(&kv.value) {
+                let is_static = is_static_literal(&kv.value);
+                if has_spread && !is_static {
+                    leading.push(PropOrSpread::Prop(prop));
+                    continue;
+                }
+                if !is_static {
                     push_dyn_name(&mut dyn_names, name.clone());
                 }
                 if is_css_prop(name.as_ref()) {
@@ -237,8 +296,15 @@ fn rewrite_object(obj: &mut ObjectLit, filename: &str, span: Span) {
         }
     }
 
+    // A spread present means `k`/`dyn` are never emitted (stable-key hazard
+    // — see doc comment above), regardless of whether `dyn_names` ended up
+    // empty anyway.
+    if has_spread {
+        dyn_names.clear();
+    }
+
     let mut new_props = Vec::with_capacity(
-        3 + spreads.len()
+        3 + leading.len()
             + c_props.is_empty() as usize
             + d_props.is_empty() as usize
             + dyn_names.is_empty() as usize
@@ -246,16 +312,18 @@ fn rewrite_object(obj: &mut ObjectLit, filename: &str, span: Span) {
     );
 
     new_props.push(marker_prop());
-    new_props.extend(spreads);
+    new_props.extend(leading);
     if !c_props.is_empty() {
         new_props.push(bucket_prop("c", c_props));
     }
     if !d_props.is_empty() {
         new_props.push(bucket_prop("d", d_props));
     }
-    new_props.push(key_prop(filename, span));
-    if !dyn_names.is_empty() {
-        new_props.push(dyn_prop(dyn_names));
+    if !has_spread {
+        new_props.push(key_prop(filename, span));
+        if !dyn_names.is_empty() {
+            new_props.push(dyn_prop(dyn_names));
+        }
     }
     new_props.extend(special_props);
 
@@ -836,7 +904,7 @@ mod tests {
     }
 
     #[test]
-    fn spread_only_props_emits_no_c_d_or_dyn() {
+    fn spread_only_props_emits_no_c_d_k_or_dyn() {
         let obj = transformed_object(
             r#"
             import { Div } from '@meonode/ui';
@@ -848,12 +916,148 @@ mod tests {
         assert!(!has_prop(&obj, "c"));
         assert!(!has_prop(&obj, "d"));
         assert!(!has_prop(&obj, "dyn"));
+        assert!(
+            !has_prop(&obj, "k"),
+            "k must never be emitted when a spread is present — see the \
+             stable-key hazard doc comment on rewrite_object"
+        );
         let PropOrSpread::Spread(_) = &obj.props[1] else {
             panic!(
                 "expected the spread to still be present, got {:?}",
                 obj.props[1]
             );
         };
+    }
+
+    /// The stable-key hazard this test guards against: `k` is a pure
+    /// function of call-site source position, so if it were emitted here,
+    /// two evaluations of this exact call site with *different* `extra`
+    /// contents would get an identical stable key — and, combined with a
+    /// `deps` array, could return a stale cached element built from a
+    /// different evaluation's props. Even when every other prop is a static
+    /// literal (so `c`/`d` bucketing is otherwise fully safe), `k`/`dyn`
+    /// must still be omitted whenever a spread is present.
+    #[test]
+    fn spread_present_omits_k_and_dyn_even_with_only_static_other_props() {
+        let obj = transformed_object(
+            r#"
+            import { Div } from '@meonode/ui';
+            const extra = {};
+            Div({ ...extra, padding: '8px', id: 'x' });
+            "#,
+            "test.tsx",
+        );
+        assert!(!has_prop(&obj, "k"));
+        assert!(!has_prop(&obj, "dyn"));
+        // Bucketing for the static props is still fully retained.
+        let Expr::Object(c) = find_prop(&obj, "c") else {
+            panic!("expected `c` bucket to exist");
+        };
+        assert!(has_prop(c, "padding"));
+        let Expr::Object(d) = find_prop(&obj, "d") else {
+            panic!("expected `d` bucket to exist");
+        };
+        assert!(has_prop(d, "id"));
+    }
+
+    /// A non-static-literal prop (`onClick: handler` — an identifier, always
+    /// dynamic) alongside a spread must stay flat/unbucketed rather than
+    /// land in `d`: bucketing it would hide its actual value one level
+    /// deeper behind `d`'s own structural (key-names-only) hash once `k`
+    /// is omitted and `_getStableKey` falls back to the legacy signature
+    /// path, silently reintroducing the same stable-key collision hazard
+    /// for an ordinary dynamic prop instead of a spread. `padding` (a
+    /// static literal) is unaffected and still bucketed normally.
+    #[test]
+    fn non_static_prop_stays_flat_when_spread_present() {
+        let obj = transformed_object(
+            r#"
+            import { Div } from '@meonode/ui';
+            const extra = {};
+            Div({ ...extra, onClick: handler, padding: '8px' });
+            "#,
+            "test.tsx",
+        );
+        assert!(!has_prop(&obj, "k"));
+        assert!(!has_prop(&obj, "dyn"));
+
+        let Expr::Object(c) = find_prop(&obj, "c") else {
+            panic!("expected `c` bucket to exist");
+        };
+        assert!(has_prop(c, "padding"));
+        // `onClick` must NOT be in `d` (or `c`) — it must stay flat instead.
+        assert!(
+            !has_prop(&obj, "d"),
+            "onClick is the only would-be-`d` candidate and must stay flat, \
+             so `d` shouldn't be emitted at all"
+        );
+
+        // `onClick` should appear as a flat top-level KeyValue prop, right
+        // alongside the spread (both at Change-2's "leading" position).
+        let has_flat_on_click = obj.props.iter().any(|p| {
+            let PropOrSpread::Prop(prop) = p else {
+                return false;
+            };
+            let Prop::KeyValue(kv) = &**prop else {
+                return false;
+            };
+            matches!(&kv.key, PropName::Ident(id) if id.sym.as_ref() == "onClick")
+        });
+        assert!(
+            has_flat_on_click,
+            "expected `onClick` to be present as a flat top-level prop"
+        );
+    }
+
+    /// Multiple leading spreads plus a mixed static/dynamic set of other
+    /// props (both spreads must stay contiguous and precede every static
+    /// prop — Change 2's leading-spread rule; interleaving a spread *between*
+    /// static props is a `TrailingSpread` bail, covered separately in
+    /// `detect.rs`'s tests): the static prop still buckets, the dynamic one
+    /// stays flat with the spreads, and their combined relative source order
+    /// is preserved.
+    #[test]
+    fn mixed_static_and_dynamic_props_with_multiple_spreads() {
+        let obj = transformed_object(
+            r#"
+            import { Div } from '@meonode/ui';
+            const a = {};
+            const b = {};
+            Div({ ...a, ...b, onClick: handler, padding: '8px' });
+            "#,
+            "test.tsx",
+        );
+        assert!(!has_prop(&obj, "k"));
+        assert!(!has_prop(&obj, "dyn"));
+
+        // Leading group (everything before `c`): spread `a`, spread `b`,
+        // `onClick`, in that exact source order.
+        let leading_kinds: Vec<String> = obj.props[1..4]
+            .iter()
+            .map(|p| match p {
+                PropOrSpread::Spread(s) => {
+                    let Expr::Ident(id) = &*s.expr else {
+                        panic!("expected identifier spread argument");
+                    };
+                    format!("...{}", id.sym.as_ref())
+                }
+                PropOrSpread::Prop(prop) => {
+                    let Prop::KeyValue(kv) = &**prop else {
+                        panic!("expected a KeyValue prop");
+                    };
+                    let PropName::Ident(id) = &kv.key else {
+                        panic!("expected an ident key");
+                    };
+                    id.sym.as_ref().to_string()
+                }
+            })
+            .collect();
+        assert_eq!(leading_kinds, vec!["...a", "...b", "onClick"]);
+
+        let Expr::Object(c) = find_prop(&obj, "c") else {
+            panic!("expected `c` bucket to exist");
+        };
+        assert!(has_prop(c, "padding"));
     }
 
     // --- Change 3: quoted string keys ---

@@ -72,6 +72,28 @@ describe('wasm artifact smoke (@swc/core loading meonode_swc_plugin.wasm)', () =
     expect(code).toContain('__meo$');
     expect(code).toContain('...rest');
     expect(code).toMatch(/c:\s*{\s*padding:\s*1\s*}/);
+    // Stable-key hazard fix: `k`/`dyn` must never be emitted when a spread
+    // is present, however static everything else is — a spread's contents
+    // are invisible to `k` (a pure function of call-site source position),
+    // so two evaluations of this call site with different spread contents
+    // would otherwise collide on the same stable key.
+    expect(code).not.toMatch(/\bk:\s*"m/);
+    expect(code).not.toMatch(/\bdyn:\s*\[/);
+  });
+
+  it('leaves a dynamic prop flat (unbucketed) alongside a leading spread', async () => {
+    const src =
+      "import { Div } from '@meonode/ui'\nconst rest = {}\nDiv({ ...rest, onClick: handler, padding: 1 })\n";
+    const code = await run(src);
+
+    expect(code).toContain('__meo$');
+    expect(code).toContain('...rest');
+    expect(code).toMatch(/c:\s*{\s*padding:\s*1\s*}/);
+    // `onClick` must stay flat, not bucketed into `d` — bucketing it would
+    // hide its actual value behind `d`'s structural-only hash once the
+    // legacy stable-key fallback is in play (no `k`/`dyn` to rely on).
+    expect(code).not.toMatch(/d:\s*{/);
+    expect(code).toMatch(/onClick:\s*handler/);
   });
 
   it('bails out (leaves the call untouched) on a trailing spread', async () => {
@@ -182,8 +204,7 @@ describe('wasm artifact smoke (@swc/core loading meonode_swc_plugin.wasm)', () =
             ...rest,
             c: {
                 padding: 1
-            },
-            k: "m296cb2o5l7ebx"
+            }
         });
         "
       `);

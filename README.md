@@ -130,7 +130,7 @@ only if compiling wouldn't reorder them relative to each other.
 | Plain object literal, all values literals/idents/arrows/nested literals | Yes | The common case |
 | At most one effectful prop value anywhere in the object | Yes | Trivially order-preserving — covers `key: item.id`, a single dynamic style, etc. |
 | Two+ effectful values whose relative order survives bucketing | Yes | E.g. `{ padding: g(), onClick: f() }` — both land in emit order matching source order |
-| Leading spread(s) (`{ ...props, padding: '8px' }`) | Yes | Spread stays top-level; only static props are bucketed — see below |
+| Leading spread(s) (`{ ...props, padding: '8px' }`) | Yes | Spread stays top-level; only *static-literal* props are bucketed, `k`/`dyn` omitted — see below |
 | Non-identifier string key (`{ 'data-parallax': 1 }`) | Yes | Buckets normally, emitted with its original quoted key |
 | Callee is a shadowed/redeclared local, not the real `@meonode/ui` import | No (bail) | `ShadowedOrUnbound` |
 | Callee via namespace import (`import * as M from '@meonode/ui'; M.Div(...)`) | No (bail) | `NamespaceImport` |
@@ -151,6 +151,60 @@ object — they're moved to the tail in their original relative order, but
 never bucketed into `c`/`d`. `key` and `children` in particular keep
 `@meonode/ui`'s runtime semantics byte-identical: compiling never changes
 how either is evaluated relative to the rest of the call.
+
+### Spread-bearing call sites: prop partitioning, but not call-site keying
+
+A leading spread's contents aren't known until compile time, so a spread-
+bearing call site gets **prop partitioning but not call-site keying**: the
+`__meo$` marker, the spread itself, and `c`/`d` buckets for whatever's
+statically known are all still emitted (the classification speedup is fully
+retained for those), but **`k` and `dyn` are never emitted at all** when a
+spread is present.
+
+Why: `k` is a pure function of call-site *source position* — it's identical
+across every evaluation of the same call site regardless of what the spread
+happens to contain that time. If `k` were still emitted, two evaluations of
+`Div({ ...props, padding: '8px' })` with *different* `props` contents would
+produce an *identical* `k` (and `dyn` can't help, since a spread's contents
+aren't nameable at compile time). If that node also carries a `deps` array,
+`@meonode/ui`'s `elementCache` is keyed by the stable key derived from `k` —
+so a *stale* cached element (built from an earlier evaluation's props) could
+be returned for a later one with genuinely different spread contents.
+`BaseNode._getStableKey` falls back to its legacy `createPropSignature` path
+whenever `k` is missing (an existing, already-tested runtime fallback — see
+`@meonode/ui`'s own test "marker without k falls back to the legacy
+signature path"), which recomputes the signature at runtime instead.
+
+That legacy path hashes most top-level prop values directly (primitives
+inline, functions via a cached `toString` hash, etc.), but any *other*
+object-valued top-level prop only by its key names, not by its nested
+values. That's fine for the spread's own contents (they land as ordinary
+flat top-level props, so they're hashed by value like anything else) but
+would be a problem for a prop that got bucketed into `c`/`d` as usual: its
+actual value would become invisible to the legacy fallback, one level
+deeper behind the bucket's own structural hash — quietly reintroducing the
+exact same staleness hazard for an ordinary dynamic prop instead of a
+spread. So whenever a spread is present, a non-special prop is only
+bucketed into `c`/`d` when its value is a **static literal** (a value that
+can never differ between evaluations of the same call site, so hiding it
+behind a structural hash loses no information); anything else — including
+prop values that would otherwise have simply been listed in `dyn` — stays
+flat at the top level instead, exactly where it would sit in genuinely
+uncompiled code:
+
+```js
+// Source:
+Div({ ...props, onClick: handler, padding: '8px' })
+
+// Compiled: `padding` (static) buckets into `c`; `onClick` (dynamic) stays
+// flat, right alongside the spread. No `k`, no `dyn`.
+Div({
+  __meo$: 1,
+  ...props,
+  onClick: handler,
+  c: { padding: '8px' },
+})
+```
 
 ### `factoryModules` — recognizing wrapped factories
 

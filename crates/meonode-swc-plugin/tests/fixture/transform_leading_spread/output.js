@@ -8,6 +8,5 @@ Div({
     ...extra,
     c: {
         backgroundColor: "yellow"
-    },
-    k: "m3j4kt5683pfkp"
+    }
 });

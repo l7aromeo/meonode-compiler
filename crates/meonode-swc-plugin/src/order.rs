@@ -43,6 +43,13 @@ pub enum EmitRank {
     /// leading-spread rule (Change 2) only accepts spreads that already
     /// precede every static prop in source, so a spread's source position is
     /// never later than any `Css`/`Data`/`Special` item's anyway.
+    ///
+    /// Also used for a non-special prop that stays flat (unbucketed)
+    /// *because* a spread is present and its value isn't a static literal —
+    /// see `detect::rank_for_prop` and the stable-key-hazard doc comment on
+    /// `detect::validate_object`. Such a prop is never bucketed into `c`/`d`
+    /// when a spread is present, so it shares the spread's emitted position
+    /// class exactly.
     Spread,
     /// A non-special key recognized by `css_props::is_css_prop` — bucketed
     /// into `c`.
