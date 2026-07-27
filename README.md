@@ -18,12 +18,12 @@ pre-partitioned marker props:
 
 ```js
 // Source:
-Div({ padding: '20px', width, onClick: handler, css: { color: 'red' }, children: [A, B] })
+Div({ padding: 'theme.spacing.md', width, onClick: handler, css: { color: 'red' }, children: [A, B] })
 
 // Compiled:
 Div({
   __meo$: 2,
-  __meo$c: { padding: '20px', width },
+  __meo$c: { padding: 'var(--meonode-theme-spacing-md)', width },
   __meo$d: { onClick: handler },
   __meo$k: 'm1a2b3c',
   __meo$dyn: ['width', 'onClick'],
@@ -32,12 +32,41 @@ Div({
 })
 ```
 
-`@meonode/ui`'s runtime fast path (**requires `@meonode/ui@1.7.0-beta.2` or
-later**, which understands the schema 2 marker contract) detects the `__meo$` marker and uses the namespaced buckets directly
-instead of re-deriving them, skipping the classification and hashing pass
-entirely. Measured on `@meonode/ui`'s own benchmark suite, the compiled path
-constructs nodes **1.66x faster** than the uncompiled runtime-classification
-path.
+`@meonode/ui`'s runtime fast path (**requires `@meonode/ui@1.7.0` or later**,
+which understands the schema 2 marker contract) detects the `__meo$` marker and
+uses the namespaced buckets directly instead of re-deriving them, skipping the
+classification and hashing pass entirely.
+
+Note the `padding` value above: alongside partitioning, the plugin also resolves
+`theme.*` token strings to `var(--meonode-theme-*)` at build time. `@meonode/ui`
+performs this identical conversion at runtime on every render — its `WeakMap`
+memo only helps objects defined *outside* a render body, so every inline call
+site re-walks its props each time — so this changes *when* the conversion
+happens, never what it produces. Only prop **values** are rewritten; tokens in
+object keys (`'@media (max-width: theme.breakpoint.md)'`) are left alone, since
+CSS variables are invalid in media features and selector text.
+
+### Measured effect
+
+Two numbers, because they answer different questions:
+
+| Benchmark | Result |
+| --- | --- |
+| Node construction in isolation (`@meonode/ui`'s own suite) | **1.66x faster** |
+| End-to-end SSR, 156-node tree, production React/Emotion (`e2e/bench-theme-tokens.mjs`) | **15.2% faster** |
+
+The 1.66x figure covers only prop classification plus stable-key hashing, with
+React, Emotion and theme resolution excluded; it is not what a page render
+improves by. The end-to-end figure is, and it splits as:
+
+```text
+partitioning only:              1.4305 -> 1.3124 ms/render    8.3% faster
+partitioning + theme rewrite:   1.5426 -> 1.3084 ms/render   15.2% faster
+```
+
+Token density matters — the benchmark uses the `@meonode/ui` docs site's real
+density of ~0.8 token strings per compiled call site, and an earlier run at 7
+tokens per node overstated the gain by roughly 2x.
 
 Call sites the plugin can't safely prove are order-independent are left
 completely untouched (see [What gets compiled](#what-gets-compiled-vs-bailed)
@@ -149,6 +178,36 @@ object — they're moved to the tail in their original relative order, but
 never bucketed into `c`/`d`. `key` and `children` in particular keep
 `@meonode/ui`'s runtime semantics byte-identical: compiling never changes
 how either is evaluated relative to the rest of the call.
+
+### Theme token rewriting
+
+Within the `__meo$c`/`__meo$d` buckets, string-literal values have their
+`theme.*` tokens rewritten to `var(--meonode-theme-*)`. The scope is
+deliberately narrow:
+
+| Case | Rewritten? | Why |
+|---|---|---|
+| `padding: 'theme.spacing.md'` | Yes | Direct bucketed value |
+| `border: '1px solid theme.base.deep'` | Yes | Rewritten in place, rest of the value preserved |
+| `'data-token': 'theme.primary'` | Yes | The runtime converts tokens in DOM props too |
+| `'@media (max-width: theme.breakpoint.md)': {...}` | **No** | It's a *key*; `var()` is invalid in media features, so the runtime must resolve it concretely |
+| `css: { color: 'theme.primary' }` | **No** | `css` is a special key, never bucketed — left to the runtime |
+| `theme: {...}` | **No** | Special key. Rewriting inside a theme *definition* would corrupt it |
+| `` padding: `theme.spacing.${size}` `` | **No** | Not a static string literal |
+
+Skipping nested objects means `css:` blocks are still resolved at runtime. That
+covers less ground than recursing would, but on the `@meonode/ui` docs site only
+42 of 758 token-bearing lines sit inside a nested object, so ~94% of tokens are
+still handled at build time for a fraction of the risk.
+
+Two runtime quirks are reproduced deliberately, because diverging would make
+compiled and uncompiled call sites disagree:
+
+- The scan has no word boundary, so `'mytheme.primary'` really does become
+  `'myvar(--meonode-theme-primary)'`.
+- A token naming nothing under `theme.system` still becomes a `var()`
+  reference. `'theme.mode'` compiles to `var(--meonode-theme-mode)`, which no
+  `:root` rule defines — exactly as the runtime already leaves it.
 
 ### Spread-bearing call sites: prop partitioning, but not call-site keying
 
@@ -301,14 +360,11 @@ bun run test            # cargo test --workspace + vitest (unit/fixture + wasm s
 bun run test:e2e        # Next Turbopack + Vite real-build parity fixtures (slow — real bundler builds)
 ```
 
-`@meonode/ui` is pinned to an exact prerelease version (currently
-`1.7.0-beta.2`, the `beta` dist-tag) in the root `package.json` and in
-`e2e/next-app`/`e2e/vite-app`'s `package.json`, rather than a semver range,
-so `bun run test` / `bun run test:e2e` stay reproducible. This repo's compiler
-runtime fast path depends on `@meonode/ui` runtime support that is still on
-an unreleased branch (see the compatibility note above) — bump this pin
-whenever `@meonode/ui` cuts a new `beta` (or, once the runtime support lands
-on its default branch, switch to a real released version).
+`@meonode/ui` is a released dependency now that schema 2 runtime support has
+shipped: the root `package.json` tracks `^1.7.0`, while `e2e/next-app` and
+`e2e/vite-app` pin the exact version (`1.7.0`) so real-bundler parity runs stay
+reproducible. Bump the e2e pins deliberately when validating against a newer
+`@meonode/ui`; there is no longer any prerelease or `beta` dist-tag involved.
 
 Test coverage as of this writing: 115 Rust tests (unit + SWC fixture tests),
 24 Vitest tests (9 WASM artifact smoke tests via `@swc/core`'s real plugin

@@ -17,3 +17,6 @@ e2e/**/.next-webpack-off/
 e2e/**/dist/
 e2e/**/dist-on/
 e2e/**/dist-off/
+
+# Transformed sources written by e2e/bench-theme-tokens.mjs so it can import them
+e2e/.bench-tmp/

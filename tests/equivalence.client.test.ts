@@ -39,6 +39,11 @@ const FIXTURES = [
   'leading-spread',
   'keyed-list',
   'quoted-data-attribute',
+  // v0.4 theme-token rewriting. Matters especially on the client: the server
+  // reaches `var(...)` via `replaceThemeTokensWithCssVars`, the client via
+  // `resolveObjWithTheme(..., { themeStringsMode: 'vars' })`. Two different code
+  // paths that must both agree with the compiled form.
+  'theme-tokens-in-keys',
 ]
 
 async function compile(src: string, filename: string, withPlugin: boolean): Promise<string> {

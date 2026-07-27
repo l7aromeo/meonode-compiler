@@ -4,12 +4,14 @@
 //! call sites into pre-partitioned marker props at build time:
 //!
 //! ```text
-//! { __meo$: 1, c: { ... }, d: { ... }, k: '...', dyn: [ ... ] }
+//! { __meo$: 2, __meo$c: { ... }, __meo$d: { ... }, __meo$k: '...', __meo$dyn: [ ... ] }
 //! ```
 //!
 //! Call-site *detection* (see `detect.rs`) and the effect-safety classifier
 //! it relies on (`effect.rs`) decide which call sites are safe to rewrite;
-//! `partition.rs` performs the actual rewrite for every call site it accepts.
+//! `partition.rs` performs the actual rewrite for every call site it accepts,
+//! including the `theme.*` -> `var(--meonode-theme-*)` value rewrite in
+//! `theme.rs`.
 
 use swc_core::ecma::ast::Program;
 use swc_core::plugin::metadata::{
@@ -32,6 +34,12 @@ mod effect;
 // Shared prop-key utilities (special-key set, key-name extraction) used by
 // both `detect` and `partition` — see module docs for why they must agree.
 mod keys;
+
+// Build-time `theme.*` -> `var(--meonode-theme-*)` rewriting, applied by
+// `partition` to bucketed prop *values*. Public so its unit tests document the
+// fidelity contract with @meonode/ui's `toThemeVarName` /
+// `replaceThemeTokensWithCssVars`, which it must mirror quirk-for-quirk.
+pub mod theme;
 
 // Evaluation-order safety analysis (v0.2 rule, Change 1) — the standalone,
 // AST-agnostic core of "would compiling this reorder an effectful value

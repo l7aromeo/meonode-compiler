@@ -76,6 +76,9 @@ const FIXTURES: FixtureSpec[] = [
   { name: 'bailout-trailing-spread', expectMarker: false },
   { name: 'keyed-list', expectMarker: true },
   { name: 'quoted-data-attribute', expectMarker: true },
+  // v0.4: build-time theme-token rewriting, and the values-only boundary it
+  // must respect (tokens in media-query/selector keys stay raw).
+  { name: 'theme-tokens-in-keys', expectMarker: true },
 ]
 
 /**
