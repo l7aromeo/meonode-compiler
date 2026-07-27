@@ -1,21 +1,28 @@
-//! Effect-safety classifier for prop values.
+//! Effect and reorder-safety classifiers for prop values.
 //!
-//! Task 9's partitioner rewrites a compilable call's props object literal
-//! into separate `c` (CSS) / `d` (data) buckets, which means every bucketed
-//! prop now evaluates in a new order: all `c` values before all `d` values,
-//! rather than each value evaluating in its original source position. For
-//! that reorder to be behavior-preserving, every prop value in the object —
-//! bucketed or not — must be provably free of observable side effects, since
-//! side-effect-free expressions produce the same result no matter when
-//! they're evaluated.
+//! The partitioner rewrites a compilable call's props object literal into
+//! separate `__meo$c` (CSS) / `__meo$d` (DOM) buckets, so bucketed props no
+//! longer evaluate in their original source positions: all `c` values run
+//! before all `d` values, and special keys move to the tail.
 //!
-//! This module is the single source of truth for that judgment, shared by:
+//! An earlier version demanded every prop value be side-effect-free. That was
+//! both too strict (bailing common shapes) and, once relaxed to "only
+//! effectful values must keep their order", unsound — effect-free is not
+//! value-stable. See `order.rs` for the worked counterexample.
 //!
-//! - `detect.rs`, which bails a call site (`BailReason::EffectfulValue`) if
-//!   any prop value in its props object literal fails [`is_effect_free`];
-//! - `partition.rs`, which uses [`is_static_literal`] (a strictly narrower
-//!   check) to decide whether a bucketed prop's name belongs in the `dyn`
-//!   list.
+//! This module is the single source of truth for three related judgments:
+//!
+//! - [`is_effect_free`] — can this expression cause an observable side effect?
+//!   `detect.rs` uses it to decide whether an object contains any effectful
+//!   value at all, which is what makes reordering observable in the first
+//!   place.
+//! - [`is_order_inert`] — is this expression's *position* unobservable?
+//!   Static literals and closure definitions qualify. `detect.rs` filters
+//!   these out of the order sequence it hands to `order::order_preserved`.
+//! - [`is_static_literal`] — the narrowest check, used by `partition.rs` to
+//!   decide `dyn` membership and flat-vs-bucketed placement. Deliberately
+//!   *not* widened alongside `is_order_inert`: widening it would change what
+//!   gets hashed into the stable key.
 
 use swc_core::ecma::ast::*;
 
@@ -104,6 +111,33 @@ pub fn is_static_literal(expr: &Expr) -> bool {
         Expr::Unary(unary) => is_numeric_unary(unary),
         Expr::Tpl(tpl) => tpl.exprs.is_empty(),
         _ => false,
+    }
+}
+
+/// Whether an expression's *position* among sibling prop values is
+/// unobservable — i.e. it may be freely reordered by bucketing.
+///
+/// This is deliberately distinct from [`is_static_literal`], which decides
+/// bucket membership and `dyn` participation in `partition.rs`. Widening that
+/// one would change what gets hashed into the stable key; this predicate only
+/// feeds the evaluation-order analysis in `detect::validate_object`.
+///
+/// Beyond static literals, a function or arrow *expression* qualifies: defining
+/// a closure performs no reads and no side effects. It allocates a function
+/// object capturing its bindings by reference, and nothing in the body runs
+/// until it is later invoked. So moving *when the closure is constructed*
+/// relative to a sibling that reads or mutates state cannot be observed — the
+/// closure still resolves its captures at call time, long after the whole
+/// object literal has been built.
+///
+/// This matters because writing a handler before style props
+/// (`{ onClick: () => ..., padding: cond ? a : b }`) is an extremely common
+/// shape; treating the arrow as order-sensitive would bail those call sites for
+/// no reason.
+pub fn is_order_inert(expr: &Expr) -> bool {
+    match unwrap_parens(expr) {
+        Expr::Arrow(_) | Expr::Fn(_) => true,
+        other => is_static_literal(other),
     }
 }
 

@@ -9,20 +9,33 @@
 //! (see Change 2 in the v0.2 doc) stays exactly where it was written, right
 //! after `__meo$`.
 //!
-//! Effect-free values (literals, identifiers, arrow/function expressions,
-//! nested effect-free literals — see `effect::is_effect_free`) can't observe
-//! *or* cause side effects, so moving them anywhere is unobservable. Only the
-//! relative order of *effectful* values matters: if compiling would emit two
-//! effectful values in a different relative order than they appear in
-//! source, that's an observable behavior change (whichever runs first could
-//! matter — e.g. two calls with side effects, or evaluation order affecting
-//! which throws first) and the call must bail.
+//! The rule is **not** "effect-free values move freely". Effect-free is not
+//! value-stable: reading an identifier causes no side effect, but an effectful
+//! sibling can mutate the binding being read, so moving the read across it
+//! changes the observed value:
+//!
+//! ```js
+//! let flag = 'A'; const bump = () => { flag = 'B'; return '9px' }
+//! Div({ 'data-flag': flag, padding: bump() })
+//! ```
+//!
+//! Here `padding` buckets into `c` and `'data-flag'` into `d`, so `bump()`
+//! would run before `flag` is read — turning "A" into "B".
+//!
+//! What may actually move is the *order-inert*: static literals and closure
+//! definitions (`effect::is_order_inert`). A closure definition allocates a
+//! function object capturing bindings by reference and runs nothing, so its
+//! position is unobservable. Everything else — identifier reads, member
+//! expressions, calls — must keep its relative order once any effectful value
+//! is present. When no effectful value exists at all, nothing can observe a
+//! reordering and the check is skipped.
 //!
 //! This module is the shared, standalone core of that check: given the
-//! sequence of emitted "ranks" for a call's effectful values (in source
+//! sequence of emitted "ranks" for a call's order-sensitive values (in source
 //! order), does that sequence stay non-decreasing? It has no AST knowledge at
 //! all — `detect.rs` is responsible for walking the object literal, deciding
-//! which values are effectful (`effect::is_effect_free`) and which
+//! which values are order-inert (`effect::is_order_inert`, filtered out) and
+//! whether any value is effectful at all (`effect::is_effect_free`), and which
 //! [`EmitRank`] each lands in (spread / `c` / `d` / special, using
 //! `css_props::is_css_prop` and `keys::is_special_key`), then handing the
 //! resulting sequence to [`order_preserved`].

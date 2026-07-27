@@ -43,7 +43,7 @@ use swc_core::ecma::visit::{Visit, VisitWith};
 
 use crate::config::CompileConfig;
 use crate::css_props::is_css_prop;
-use crate::effect::{is_effect_free, is_static_literal};
+use crate::effect::{is_effect_free, is_order_inert, is_static_literal};
 use crate::factories::factory_children_first;
 use crate::keys::{is_special_key, key_name_atom};
 use crate::order::{order_preserved, EmitRank};
@@ -134,15 +134,26 @@ pub enum BailReason {
     /// The object literal already has a `__meo$` key (this call site has
     /// presumably already been compiled).
     ExistingMarker,
-    /// Two or more effectful prop (or leading-spread-argument) values would
-    /// be emitted in a different relative order than they appear in source
-    /// — the v0.2 evaluation-order rule (see `order.rs` and this module's
-    /// [`validate_object`] doc comment). Effect-free values (see
-    /// `effect::is_effect_free`) can be repartitioned freely since nothing
-    /// can observe their reordering; only a genuine inversion between two
-    /// *effectful* values bails. Renamed from v1's `EffectfulValue` (which
-    /// bailed on *any* effectful value at all) now that the rule is
-    /// order-based rather than a blanket ban.
+    /// Bucketing would emit values in a different relative order than they
+    /// appear in source, in a way that is observable — the evaluation-order
+    /// rule (see `order.rs` and this module's [`validate_object`] doc).
+    ///
+    /// The rule is *not* "effect-free values may move freely": effect-free is
+    /// not value-stable. An identifier read causes no side effect of its own,
+    /// yet an effectful sibling can mutate the binding it reads, so moving it
+    /// across that sibling changes the observed value:
+    ///
+    /// ```js
+    /// let flag = 'A'; const bump = () => { flag = 'B'; return '9px' }
+    /// Div({ 'data-flag': flag, padding: bump() })   // bails
+    /// ```
+    ///
+    /// So: once *any* effectful value is present, the relative order of every
+    /// value that is not order-inert must be preserved. Order-inert means
+    /// static literals plus closure *definitions* (see
+    /// `effect::is_order_inert`) — those can be repartitioned freely. With no
+    /// effectful value anywhere, nothing can observe a reordering and the
+    /// check is skipped entirely.
     EffectfulReorder,
     /// An argument *before* `props_arg_idx` is a spread (e.g.
     /// `P(...stuff, { color: 'red' })` or `Node(...els, { padding: 1 }, deps)`).
@@ -615,7 +626,10 @@ fn validate_object(obj: &ObjectLit) -> Option<BailReason> {
                         let name = key_name_atom(&kv.key);
                         let is_static = is_static_literal(&kv.value);
                         let rank = rank_for_prop(name.as_ref(), is_static, has_spread);
-                        items.push((rank, !is_effect_free(&kv.value), is_static));
+                        // NB: `is_static` (literal-ness) drives bucket placement and
+                        // must mirror partition.rs. Reorderability is the broader
+                        // `is_order_inert`, which also covers closure definitions.
+                        items.push((rank, !is_effect_free(&kv.value), is_order_inert(&kv.value)));
                     }
                     Prop::Getter(_) | Prop::Setter(_) => {
                         return Some(BailReason::GetterSetterProp);
@@ -813,6 +827,53 @@ mod tests {
         assert_eq!(
             decisions_for(src),
             vec![Decision::Compilable { props_arg_idx: 0 }]
+        );
+    }
+
+    /// A closure definition performs no read and no effect, so its position
+    /// among siblings is unobservable. Writing a handler before style props is
+    /// an extremely common shape and must not bail. (Measured on the docs site:
+    /// this pattern alone accounted for 3 of 5 remaining EffectfulReorder bails.)
+    #[test]
+    fn arrow_before_effectful_style_props_compiles() {
+        let src = r#"
+            import { Button } from '@meonode/ui'
+            Button(category, {
+                onClick: () => setSelectedCategory(category),
+                padding: '8px 16px',
+                borderColor: selected === category ? 'theme.primary' : 'theme.border',
+            })
+        "#;
+        // `Button` is children-first, so props sit at arg 1.
+        assert_eq!(
+            decisions_for(src),
+            vec![Decision::Compilable { props_arg_idx: 1 }]
+        );
+    }
+
+    #[test]
+    fn function_expression_is_order_inert_too() {
+        let src = r#"
+            import { Div } from '@meonode/ui'
+            Div({ onClick: function () { return x }, padding: cond ? a : b })
+        "#;
+        assert_eq!(
+            decisions_for(src),
+            vec![Decision::Compilable { props_arg_idx: 0 }]
+        );
+    }
+
+    /// Guard against over-widening: only the closure *definition* is inert.
+    /// An immediately-invoked arrow actually runs, so it stays order-sensitive.
+    #[test]
+    fn immediately_invoked_arrow_still_bails() {
+        let src = r#"
+            import { Div } from '@meonode/ui'
+            Div({ 'data-flag': flag, padding: (() => bump())() })
+        "#;
+        assert_eq!(
+            decisions_for(src),
+            vec![Decision::Bail(BailReason::EffectfulReorder)]
         );
     }
 
