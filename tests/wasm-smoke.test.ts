@@ -64,9 +64,19 @@ describe('wasm artifact smoke (@swc/core loading meonode_swc_plugin.wasm)', () =
     expect(code).toMatch(/dyn:\s*\[\s*"onClick"\s*\]/);
   });
 
-  it('bails out (leaves the call untouched) on spread props', async () => {
+  it('compiles a leading spread, leaving it top-level (v0.2 Change 2)', async () => {
     const src =
       "import { Div } from '@meonode/ui'\nconst rest = {}\nDiv({ ...rest, padding: 1 })\n";
+    const code = await run(src);
+
+    expect(code).toContain('__meo$');
+    expect(code).toContain('...rest');
+    expect(code).toMatch(/c:\s*{\s*padding:\s*1\s*}/);
+  });
+
+  it('bails out (leaves the call untouched) on a trailing spread', async () => {
+    const src =
+      "import { Div } from '@meonode/ui'\nconst rest = {}\nDiv({ padding: 1, ...rest })\n";
     const code = await run(src);
 
     expect(code).not.toContain('__meo$');
@@ -159,17 +169,37 @@ describe('wasm artifact smoke (@swc/core loading meonode_swc_plugin.wasm)', () =
       `);
     });
 
-    it('matches snapshot for a bailout (spread props, untouched)', async () => {
+    it('matches snapshot for a leading spread (compiled, spread left top-level)', async () => {
       const code = await run(
         "import { Div } from '@meonode/ui'\nconst rest = {}\nDiv({ ...rest, padding: 1 })\n",
+        'snapshot-leading-spread.tsx',
+      );
+      expect(code).toMatchInlineSnapshot(`
+        "import { Div } from '@meonode/ui';
+        const rest = {};
+        Div({
+            __meo$: 1,
+            ...rest,
+            c: {
+                padding: 1
+            },
+            k: "m296cb2o5l7ebx"
+        });
+        "
+      `);
+    });
+
+    it('matches snapshot for a bailout (trailing spread, untouched)', async () => {
+      const code = await run(
+        "import { Div } from '@meonode/ui'\nconst rest = {}\nDiv({ padding: 1, ...rest })\n",
         'snapshot-bailout.tsx',
       );
       expect(code).toMatchInlineSnapshot(`
         "import { Div } from '@meonode/ui';
         const rest = {};
         Div({
-            ...rest,
-            padding: 1
+            padding: 1,
+            ...rest
         });
         "
       `);

@@ -36,6 +36,9 @@ const FIXTURES = [
   'custom-factory',
   'nested-children',
   'as-polymorphism',
+  'leading-spread',
+  'keyed-list',
+  'quoted-data-attribute',
 ]
 
 async function compile(src: string, filename: string, withPlugin: boolean): Promise<string> {

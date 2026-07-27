@@ -41,8 +41,12 @@ use swc_core::ecma::ast::*;
 use swc_core::ecma::atoms::Atom;
 use swc_core::ecma::visit::{Visit, VisitWith};
 
+use crate::config::CompileConfig;
+use crate::css_props::is_css_prop;
 use crate::effect::is_effect_free;
 use crate::factories::factory_children_first;
+use crate::keys::{is_special_key, key_name_atom};
+use crate::order::{order_preserved, EmitRank};
 
 const UI_MODULE: &str = "@meonode/ui";
 const UI_MODULE_CLIENT: &str = "@meonode/ui/client";
@@ -115,15 +119,10 @@ pub enum BailReason {
     /// object literal — e.g. an identifier, a call, a ternary, a member
     /// expression, or a spread argument.
     NotObjectLiteral,
-    /// The object literal contains a spread property (`{ ...rest }`).
-    SpreadProp,
     /// A property has a computed key (`{ [k]: v }`).
     ComputedKey,
     /// A property has a numeric (or bigint) literal key.
     NumericKey,
-    /// A property has a string literal key that isn't identifier-like
-    /// (e.g. `{ 'foo-bar': 1 }`).
-    NonIdentifierStringKey,
     /// The object literal contains a getter or setter accessor property.
     GetterSetterProp,
     /// The object literal contains a shorthand method (`{ foo() {} }`).
@@ -135,19 +134,16 @@ pub enum BailReason {
     /// The object literal already has a `__meo$` key (this call site has
     /// presumably already been compiled).
     ExistingMarker,
-    /// A property's value isn't provably free of side effects (see
-    /// `effect::is_effect_free`). Task 9's partitioner reorders evaluation
-    /// (all `c`-bucket props before all `d`-bucket props), which is only
-    /// behavior-preserving when every value commutes — i.e. is a literal,
-    /// identifier, function/arrow expression, substitution-free template, or
-    /// a nested object/array literal built entirely from those. Anything
-    /// that could observably run code (calls, member access, `await`,
-    /// assignments, `new`, tagged templates, conditionals, ...) bails.
-    ///
-    /// One exception: an effectful `children` value is allowed when
-    /// `children` is the last prop in source order (or the only prop) — see
-    /// [`validate_object`]'s doc comment for why that's still safe.
-    EffectfulValue,
+    /// Two or more effectful prop (or leading-spread-argument) values would
+    /// be emitted in a different relative order than they appear in source
+    /// — the v0.2 evaluation-order rule (see `order.rs` and this module's
+    /// [`validate_object`] doc comment). Effect-free values (see
+    /// `effect::is_effect_free`) can be repartitioned freely since nothing
+    /// can observe their reordering; only a genuine inversion between two
+    /// *effectful* values bails. Renamed from v1's `EffectfulValue` (which
+    /// bailed on *any* effectful value at all) now that the rule is
+    /// order-based rather than a blanket ban.
+    EffectfulReorder,
     /// An argument *before* `props_arg_idx` is a spread (e.g.
     /// `P(...stuff, { color: 'red' })` or `Node(...els, { padding: 1 }, deps)`).
     /// A leading spread means the real runtime argument count — and
@@ -157,6 +153,17 @@ pub enum BailReason {
     /// entirely. Bail rather than risk a wrong marker placement on
     /// otherwise-valid input.
     SpreadBeforeProps,
+    /// A spread property (`...rest`) inside the props object literal itself
+    /// appears *after* a static (non-spread) prop, e.g.
+    /// `{ padding: 1, ...rest }`. Change 2 (v0.2) allows *leading* spreads —
+    /// all spreads before all static props — to compile by leaving the
+    /// spread(s) top-level in the emitted object; a trailing spread would
+    /// need to win over an earlier static prop for correct precedence, which
+    /// the emitted merge order (`{ ...passthroughCss, ...markerCss, ...css }`
+    /// at runtime) can't express, since the compiler-bucketed static props
+    /// always come after the spread in the emitted shape. See
+    /// [`validate_object`]'s doc comment.
+    TrailingSpread,
 }
 
 /// The detection outcome for a single call expression.
@@ -185,24 +192,52 @@ fn is_ui_module(src: &Str) -> bool {
     src.value == UI_MODULE || src.value == UI_MODULE_CLIENT
 }
 
-/// Pass 1: collects `@meonode/ui`/`@meonode/ui/client` import bindings.
+/// Returns `true` if `src` matches one of the user-configured
+/// `factoryModules` (Change 4 / v0.2's "Factory recognition beyond
+/// @meonode/ui"), e.g. `"@meonode/mui"`.
+fn is_factory_module(src: &Str, factory_modules: &[String]) -> bool {
+    let src_value = src.value.as_str().unwrap_or_default();
+    factory_modules.iter().any(|m| src_value == m.as_str())
+}
+
+/// `true` if `name`'s first character is an ASCII uppercase letter — the
+/// heuristic `factoryModules` uses to tell a component export (`Button`)
+/// apart from a helper export (`createMuiNode`, `isProbablyMuiTheme`), which
+/// is ignored. Empty names (shouldn't occur for a real JS identifier) are not
+/// capitalized.
+fn is_capitalized(name: &str) -> bool {
+    name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+}
+
+/// Pass 1: collects `@meonode/ui`/`@meonode/ui/client` import bindings, plus
+/// (per Change 4) capitalized named imports from any configured
+/// `factoryModules` entry, treated as props-at-arg-0 factories.
 ///
 /// Runs as its own traversal (rather than being folded into the main
 /// detector) so that local-factory derivation (pass 2) and call
 /// classification (pass 3) always see the complete import table regardless
 /// of where in the file the imports happen to be written.
-#[derive(Default)]
-struct ImportCollector {
+struct ImportCollector<'a> {
+    factory_modules: &'a [String],
     bindings: HashMap<BindKey, ImportBinding>,
     namespace_imports: HashSet<BindKey>,
 }
 
-impl Visit for ImportCollector {
+impl Visit for ImportCollector<'_> {
     fn visit_import_decl(&mut self, n: &ImportDecl) {
-        if n.type_only || !is_ui_module(&n.src) {
+        if n.type_only {
             return;
         }
+        if is_ui_module(&n.src) {
+            self.collect_ui_module_specifiers(n);
+        } else if is_factory_module(&n.src, self.factory_modules) {
+            self.collect_factory_module_specifiers(n);
+        }
+    }
+}
 
+impl ImportCollector<'_> {
+    fn collect_ui_module_specifiers(&mut self, n: &ImportDecl) {
         for spec in &n.specifiers {
             match spec {
                 ImportSpecifier::Named(named) => {
@@ -253,6 +288,48 @@ impl Visit for ImportCollector {
                     // @meonode/ui has no default export used as a factory;
                     // nothing to track.
                 }
+            }
+        }
+    }
+
+    /// Change 4: a capitalized named import from a configured `factoryModules`
+    /// entry is treated as a props-at-arg-0 factory, same call shape as a
+    /// plain `@meonode/ui` HTML factory (`CandidateKind::Html { children_first:
+    /// false }`) — verified against `@meonode/mui`'s real shape, where every
+    /// capitalized export is built by `createMuiNode(element, initialProps)`
+    /// and takes props as its first (and only) argument. Lowercase exports
+    /// (helpers, e.g. `createMuiNode` itself) are ignored outright — not
+    /// tracked as anything, so they can never be mistaken for a factory nor
+    /// trigger a spurious `ShadowedOrUnbound` bail. Namespace imports are
+    /// tracked the same way as `@meonode/ui`'s (bails via `NamespaceImport`).
+    fn collect_factory_module_specifiers(&mut self, n: &ImportDecl) {
+        for spec in &n.specifiers {
+            match spec {
+                ImportSpecifier::Named(named) => {
+                    if named.is_type_only {
+                        continue;
+                    }
+                    let imported_name: &Atom = match &named.imported {
+                        Some(ModuleExportName::Ident(id)) => &id.sym,
+                        Some(ModuleExportName::Str(_)) => continue,
+                        None => &named.local.sym,
+                    };
+                    if !is_capitalized(imported_name.as_ref()) {
+                        continue;
+                    }
+                    let key = (named.local.sym.clone(), named.local.ctxt);
+                    self.bindings.insert(
+                        key,
+                        ImportBinding::Candidate(CandidateKind::Html {
+                            children_first: false,
+                        }),
+                    );
+                }
+                ImportSpecifier::Namespace(ns) => {
+                    self.namespace_imports
+                        .insert((ns.local.sym.clone(), ns.local.ctxt));
+                }
+                ImportSpecifier::Default(_) => {}
             }
         }
     }
@@ -402,15 +479,19 @@ fn unwrap_parens(mut expr: &Expr) -> &Expr {
     expr
 }
 
-/// The one special key exempt from the blanket effect-free requirement,
-/// under a narrow condition — see [`validate_object`]'s doc comment.
-const CHILDREN_KEY: &str = "children";
-
-fn is_children_key(key: &PropName) -> bool {
-    match key {
-        PropName::Ident(id) => id.sym.as_ref() == CHILDREN_KEY,
-        PropName::Str(s) => s.value == CHILDREN_KEY,
-        _ => false,
+/// Returns this key's [`EmitRank`] — where partition.rs's rewrite will place
+/// a prop with this name, for the evaluation-order check in
+/// [`validate_object`]. Mirrors `partition.rs::rewrite_object`'s own
+/// bucket-assignment precedence exactly (special key wins over CSS-prop
+/// membership): the two must never diverge, or this analysis would be
+/// judging an emission shape that isn't the one actually produced.
+fn rank_for_key(name: &str) -> EmitRank {
+    if is_special_key(name) {
+        EmitRank::Special
+    } else if is_css_prop(name) {
+        EmitRank::Css
+    } else {
+        EmitRank::Data
     }
 }
 
@@ -422,64 +503,80 @@ fn is_children_key(key: &PropName) -> bool {
 /// reported as [`BailReason::ExistingMarker`], even if it happens to also
 /// contain some other bail-worthy shape.
 ///
-/// ## The `children`-last exception
+/// ## Leading spreads (Change 2)
 ///
-/// Every prop value must normally be provably side-effect-free (see
-/// [`is_effect_free`]'s doc comment for why). `children` gets one narrow
-/// exception: an effectful `children` value (most commonly, an array of
-/// nested factory calls like `[Div({...}), P('x', {...})]`) is still allowed
-/// *if `children` is the last prop in source order* (or the only prop).
+/// A spread property (`...rest`) is allowed only while every prop seen so far
+/// has *also* been a spread — i.e. all spreads must precede all static props.
+/// The first static (non-spread) prop flips a `seen_static_prop` flag; any
+/// spread encountered afterward bails with [`BailReason::TrailingSpread`].
+/// Leading spreads stay top-level in the emitted object (`partition.rs`
+/// doesn't bucket them), so their relative order amongst each other is
+/// preserved automatically — nothing here needs to reorder them.
 ///
-/// `partition.rs`'s emit order moves every special key — `children` included
-/// — to the tail of the rewritten object, in their original relative order.
-/// So if `children` was already source-final, nothing else in the object
-/// moves past it: every other prop either gets bucketed into `c`/`d` (which
-/// sort *before* `children`'s new position, same as its old one) or is
-/// itself a special key that, by definition of `children` being *last*,
-/// already appeared before it in the source. Either way `children` keeps
-/// its evaluation position relative to everything else, so its effects
-/// (however arbitrary) aren't reordered relative to any sibling prop —
-/// only `children`'s own effectful sub-expressions (e.g. the nested calls'
-/// own props) run later than they would have, which is unobservable since
-/// nothing else in this object depends on when *those* run.
+/// ## Evaluation-order safety (v0.2 rule, Change 1)
 ///
-/// If `children` is effectful and NOT source-final, this exception doesn't
-/// apply and it bails like any other prop.
+/// `partition.rs` reorders evaluation: every prop lands in a bucket
+/// (`Spread` < `Css` < `Data` < `Special`, see [`EmitRank`]), and cross-bucket
+/// order is *not* source order — only same-bucket relative order is
+/// preserved. Effect-free values (`effect::is_effect_free`) can't observe
+/// this, so only *effectful* values' relative order matters. This function
+/// collects every prop's (or leading spread argument's) [`EmitRank`] and
+/// whether its value is effectful, in source order, then hands the
+/// effectful-only subsequence to [`order_preserved`]; a `false` result bails
+/// with [`BailReason::EffectfulReorder`].
+///
+/// This subsumes v1's `children`-last exception: a source-final effectful
+/// `children` is just the (trivially-fine) one-effectful-value case, since
+/// `children`'s `Special` rank is emitted after `Css`/`Data`, matching where
+/// it already was, and there being only one effectful value overall means
+/// there's nothing to reorder it relative to.
 fn validate_object(obj: &ObjectLit) -> Option<BailReason> {
     if obj.props.iter().any(is_marker_prop) {
         return Some(BailReason::ExistingMarker);
     }
 
-    let last_idx = obj.props.len().saturating_sub(1);
-    for (idx, prop_or_spread) in obj.props.iter().enumerate() {
+    let mut seen_static_prop = false;
+    // (rank, is_effectful) per prop/spread, in source order.
+    let mut items: Vec<(EmitRank, bool)> = Vec::with_capacity(obj.props.len());
+
+    for prop_or_spread in obj.props.iter() {
         match prop_or_spread {
-            PropOrSpread::Spread(_) => return Some(BailReason::SpreadProp),
-            PropOrSpread::Prop(prop) => match &**prop {
-                Prop::Shorthand(_) => {}
-                Prop::KeyValue(kv) => {
-                    if let Some(reason) = validate_key(&kv.key) {
-                        return Some(reason);
-                    }
-                    // Every prop value — bucketed or special-key — must be
-                    // provably side-effect-free: Task 9's partitioner
-                    // reorders evaluation (all `c` before `d`), and special
-                    // keys move to the end of the emitted object (see
-                    // `partition.rs`), so nothing here can safely observe
-                    // side effects tied to source-order evaluation. The one
-                    // exception is a source-final `children` — see the
-                    // doc comment above.
-                    let is_exempt_children = is_children_key(&kv.key) && idx == last_idx;
-                    if !is_exempt_children && !is_effect_free(&kv.value) {
-                        return Some(BailReason::EffectfulValue);
-                    }
+            PropOrSpread::Spread(spread) => {
+                if seen_static_prop {
+                    return Some(BailReason::TrailingSpread);
                 }
-                Prop::Getter(_) | Prop::Setter(_) => {
-                    return Some(BailReason::GetterSetterProp);
+                items.push((EmitRank::Spread, !is_effect_free(&spread.expr)));
+            }
+            PropOrSpread::Prop(prop) => {
+                seen_static_prop = true;
+                match &**prop {
+                    // Shorthand's implicit value is the identifier itself,
+                    // which is always effect-free (reading a binding).
+                    Prop::Shorthand(ident) => {
+                        items.push((rank_for_key(ident.sym.as_ref()), false));
+                    }
+                    Prop::KeyValue(kv) => {
+                        if let Some(reason) = validate_key(&kv.key) {
+                            return Some(reason);
+                        }
+                        let name = key_name_atom(&kv.key);
+                        items.push((rank_for_key(name.as_ref()), !is_effect_free(&kv.value)));
+                    }
+                    Prop::Getter(_) | Prop::Setter(_) => {
+                        return Some(BailReason::GetterSetterProp);
+                    }
+                    Prop::Method(_) => return Some(BailReason::MethodProp),
+                    Prop::Assign(_) => return Some(BailReason::UnsupportedPropKind),
                 }
-                Prop::Method(_) => return Some(BailReason::MethodProp),
-                Prop::Assign(_) => return Some(BailReason::UnsupportedPropKind),
-            },
+            }
         }
+    }
+
+    let effectful_ranks = items
+        .into_iter()
+        .filter_map(|(rank, effectful)| effectful.then_some(rank));
+    if !order_preserved(effectful_ranks) {
+        return Some(BailReason::EffectfulReorder);
     }
 
     None
@@ -500,34 +597,33 @@ fn is_marker_prop(prop_or_spread: &PropOrSpread) -> bool {
     }
 }
 
+/// Validates a prop key's *kind*. As of v0.2 (Change 3), any string literal
+/// key is fine — including non-identifier-like ones (`'data-parallax'`,
+/// `'aria-label'`) — since they bucket normally and are emitted as quoted
+/// keys, using the same `PropName` node they were parsed with (see
+/// `partition.rs::rewrite_object`, which re-pushes the original `Prop`
+/// unchanged). Only computed and numeric/bigint keys are structurally
+/// unemittable in this shape and still bail.
 fn validate_key(key: &PropName) -> Option<BailReason> {
     match key {
-        PropName::Ident(_) => None,
-        PropName::Str(s) => match s.value.as_str() {
-            Some(value) if is_identifier_like(value) => None,
-            _ => Some(BailReason::NonIdentifierStringKey),
-        },
+        PropName::Ident(_) | PropName::Str(_) => None,
         PropName::Num(_) | PropName::BigInt(_) => Some(BailReason::NumericKey),
         PropName::Computed(_) => Some(BailReason::ComputedKey),
     }
 }
 
-fn is_identifier_like(s: &str) -> bool {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) if c == '_' || c == '$' || c.is_ascii_alphabetic() => {}
-        _ => return false,
-    }
-    chars.all(|c| c == '_' || c == '$' || c.is_ascii_alphanumeric())
-}
-
 /// Runs the full three-pass detector over `program` and returns every
-/// recorded call-site decision, in traversal order.
+/// recorded call-site decision, in traversal order. `config.factory_modules`
+/// (Change 4) extends pass 1's import recognition beyond `@meonode/ui`.
 ///
 /// This is read-only: it never mutates `program`. The returned decisions are
 /// consumed by Task 9's rewrite pass; for now nothing acts on them.
-pub fn detect(program: &Program) -> Vec<CallSiteDecision> {
-    let mut imports = ImportCollector::default();
+pub fn detect(program: &Program, config: &CompileConfig) -> Vec<CallSiteDecision> {
+    let mut imports = ImportCollector {
+        factory_modules: &config.factory_modules,
+        bindings: HashMap::new(),
+        namespace_imports: HashSet::new(),
+    };
     program.visit_with(&mut imports);
 
     let mut locals = LocalFactoryCollector {
@@ -564,8 +660,8 @@ pub fn detect(program: &Program) -> Vec<CallSiteDecision> {
 /// starts rewriting anything. `tests/fixture.rs` also calls this directly
 /// (via a detect-only `Pass`) to exercise detection in isolation, proving the
 /// visitor traverses these shapes without mutating anything on its own.
-pub fn transform_program(program: &Program) -> Vec<CallSiteDecision> {
-    detect(program)
+pub fn transform_program(program: &Program, config: &CompileConfig) -> Vec<CallSiteDecision> {
+    detect(program, config)
 }
 
 #[cfg(test)]
@@ -581,8 +677,18 @@ mod tests {
 
     /// Parses `src` as an ES module, runs the resolver (mirroring what the
     /// swc plugin host does before invoking the plugin), then runs detection
-    /// and returns the recorded [`Decision`]s in traversal order.
+    /// with the default (empty `factoryModules`) config and returns the
+    /// recorded [`Decision`]s in traversal order.
     fn decisions_for(src: &str) -> Vec<Decision> {
+        decisions_for_with_config(src, &CompileConfig::default())
+    }
+
+    /// Like [`decisions_for`], but with a caller-supplied [`CompileConfig`] —
+    /// used to exercise Change 4's `factoryModules` option directly, since
+    /// `TransformPluginProgramMetadata::get_transform_plugin_config` always
+    /// returns `None` outside a real wasm32 plugin host (see `config.rs`),
+    /// making the JSON-metadata path itself untestable from `cargo test`.
+    fn decisions_for_with_config(src: &str, config: &CompileConfig) -> Vec<Decision> {
         GLOBALS.set(&Globals::new(), || {
             let cm: Lrc<SourceMap> = Default::default();
             let fm = cm.new_source_file(Lrc::new(FileName::Anon), src.to_string());
@@ -602,7 +708,10 @@ mod tests {
             let top_level_mark = Mark::new();
             program.visit_mut_with(&mut resolver(unresolved_mark, top_level_mark, false));
 
-            detect(&program).into_iter().map(|d| d.decision).collect()
+            detect(&program, config)
+                .into_iter()
+                .map(|d| d.decision)
+                .collect()
         })
     }
 
@@ -732,7 +841,10 @@ mod tests {
     }
 
     #[test]
-    fn spread_in_props_bails() {
+    fn leading_spread_in_props_is_fine() {
+        // Change 2: a spread preceding every static prop compiles — the
+        // spread stays top-level in the emitted object; only `padding` gets
+        // bucketed.
         let decisions = decisions_for(
             r#"
             import { Div } from '@meonode/ui';
@@ -740,7 +852,74 @@ mod tests {
             Div({ ...rest, padding: 1 });
             "#,
         );
-        assert_eq!(decisions, vec![Decision::Bail(BailReason::SpreadProp)]);
+        assert_eq!(decisions, vec![Decision::Compilable { props_arg_idx: 0 }]);
+    }
+
+    #[test]
+    fn multiple_leading_spreads_are_fine() {
+        let decisions = decisions_for(
+            r#"
+            import { Div } from '@meonode/ui';
+            const a = {};
+            const b = {};
+            Div({ ...a, ...b, padding: 1 });
+            "#,
+        );
+        assert_eq!(decisions, vec![Decision::Compilable { props_arg_idx: 0 }]);
+    }
+
+    #[test]
+    fn trailing_spread_bails() {
+        // A spread *after* a static prop would need to win over that
+        // preceding prop for correct precedence, which the emitted merge
+        // order can't express — see `BailReason::TrailingSpread`.
+        let decisions = decisions_for(
+            r#"
+            import { Div } from '@meonode/ui';
+            const rest = {};
+            Div({ padding: 1, ...rest });
+            "#,
+        );
+        assert_eq!(decisions, vec![Decision::Bail(BailReason::TrailingSpread)]);
+    }
+
+    #[test]
+    fn spread_sandwiched_between_static_props_bails() {
+        let decisions = decisions_for(
+            r#"
+            import { Div } from '@meonode/ui';
+            const rest = {};
+            Div({ padding: 1, ...rest, color: 'red' });
+            "#,
+        );
+        assert_eq!(decisions, vec![Decision::Bail(BailReason::TrailingSpread)]);
+    }
+
+    #[test]
+    fn spread_only_props_is_fine() {
+        // No static props at all — still a valid (if degenerate) leading
+        // spread: nothing to bucket, spread stays top-level.
+        let decisions = decisions_for(
+            r#"
+            import { Div } from '@meonode/ui';
+            const rest = {};
+            Div({ ...rest });
+            "#,
+        );
+        assert_eq!(decisions, vec![Decision::Compilable { props_arg_idx: 0 }]);
+    }
+
+    #[test]
+    fn effectful_spread_argument_as_only_effectful_value_is_fine() {
+        // `f()` (the spread's argument) is the only effectful value in the
+        // object; trivially order-preserving.
+        let decisions = decisions_for(
+            r#"
+            import { Div } from '@meonode/ui';
+            Div({ ...f(), padding: '1px' });
+            "#,
+        );
+        assert_eq!(decisions, vec![Decision::Compilable { props_arg_idx: 0 }]);
     }
 
     #[test]
@@ -767,17 +946,29 @@ mod tests {
     }
 
     #[test]
-    fn non_identifier_like_string_key_bails() {
+    fn non_identifier_like_string_key_is_fine() {
+        // Change 3 (v0.2): non-identifier string keys (`'foo-bar'`,
+        // `'data-parallax'`, `'aria-label'`) used to bail with
+        // `NonIdentifierStringKey` — an oversight, not a safety requirement.
+        // They now bucket normally, emitted with their original quoted key.
         let decisions = decisions_for(
             r#"
             import { Div } from '@meonode/ui';
             Div({ "foo-bar": 1 });
             "#,
         );
-        assert_eq!(
-            decisions,
-            vec![Decision::Bail(BailReason::NonIdentifierStringKey)]
+        assert_eq!(decisions, vec![Decision::Compilable { props_arg_idx: 0 }]);
+    }
+
+    #[test]
+    fn quoted_data_attribute_key_is_fine() {
+        let decisions = decisions_for(
+            r#"
+            import { Div } from '@meonode/ui';
+            Div({ padding: '4px', "data-parallax": "true", "aria-label": "hi" });
+            "#,
         );
+        assert_eq!(decisions, vec![Decision::Compilable { props_arg_idx: 0 }]);
     }
 
     #[test]
@@ -899,25 +1090,61 @@ mod tests {
     }
 
     #[test]
-    fn effectful_call_value_bails() {
+    fn single_effectful_call_value_is_fine() {
+        // v0.2: with only one effectful value in the whole object (`x: f()`
+        // — `padding: 1` is a static literal), there's nothing to reorder it
+        // relative to, so this compiles (v1 bailed on any effectful value at
+        // all).
         let decisions = decisions_for(
             r#"
             import { Div } from '@meonode/ui';
             Div({ padding: 1, x: f() });
             "#,
         );
-        assert_eq!(decisions, vec![Decision::Bail(BailReason::EffectfulValue)]);
+        assert_eq!(decisions, vec![Decision::Compilable { props_arg_idx: 0 }]);
     }
 
     #[test]
-    fn effectful_member_expr_value_bails() {
+    fn single_effectful_member_expr_value_is_fine() {
         let decisions = decisions_for(
             r#"
             import { Div } from '@meonode/ui';
             Div({ padding: 1, x: a.b });
             "#,
         );
-        assert_eq!(decisions, vec![Decision::Bail(BailReason::EffectfulValue)]);
+        assert_eq!(decisions, vec![Decision::Compilable { props_arg_idx: 0 }]);
+    }
+
+    #[test]
+    fn two_effectful_values_in_source_and_emit_order_compiles() {
+        // `padding` (Css bucket, effectful: `g()`) precedes `onClick` (Data
+        // bucket, effectful: `f()`) in both source order *and* emitted order
+        // (Css always emits before Data) — no reorder, so this compiles.
+        let decisions = decisions_for(
+            r#"
+            import { Div } from '@meonode/ui';
+            Div({ padding: g(), onClick: f() });
+            "#,
+        );
+        assert_eq!(decisions, vec![Decision::Compilable { props_arg_idx: 0 }]);
+    }
+
+    #[test]
+    fn two_effectful_values_reordered_by_bucketing_bails() {
+        // `onClick` (Data bucket, effectful: `f()`) precedes `padding` (Css
+        // bucket, effectful: `g()`) in source, but emission always puts Css
+        // before Data — so compiling would run `g()` before `f()`, the
+        // reverse of source order. Bails via `EffectfulReorder`.
+        let decisions = decisions_for(
+            r#"
+            import { Div } from '@meonode/ui';
+            Div({ onClick: f(), padding: g() });
+            "#,
+        );
+        assert_eq!(
+            decisions,
+            vec![Decision::Bail(BailReason::EffectfulReorder)]
+        );
     }
 
     #[test]
@@ -939,9 +1166,11 @@ mod tests {
             Div({ padding: '1px', onClick: h, children: [Div({ color: 'red' }), P('x', { color: 'blue' })] });
             "#,
         );
-        // Both the outer call and the two nested factory calls used as
-        // `children` are independently compilable — see module docs on the
-        // `children`-last exception.
+        // `children` is the *only* effectful value here (`onClick: h` is an
+        // identifier read, effect-free) — trivially order-preserving under
+        // v0.2 regardless of its source position (subsuming v1's
+        // `children`-last exception). Both the outer call and the two nested
+        // factory calls used as `children` are independently compilable.
         assert_eq!(
             decisions,
             vec![
@@ -964,14 +1193,42 @@ mod tests {
     }
 
     #[test]
-    fn effectful_children_not_last_bails() {
+    fn effectful_children_not_last_but_only_effectful_value_is_fine() {
+        // v0.2 (Change 1) subsumes and strictly widens v1's `children`-last
+        // exception: `children: [f()]` is the *only* effectful value here —
+        // `padding: '1px'` is a static literal — so this now compiles even
+        // though `children` isn't source-final. v1 bailed on this shape
+        // (`EffectfulValue`, since the old exception required `children` to
+        // be last); the Rust fixture `transform_children_not_last_bail` is
+        // updated to match (renamed/re-asserted as compiling — see its
+        // module comment).
         let decisions = decisions_for(
             r#"
             import { Div } from '@meonode/ui';
             Div({ children: [f()], padding: '1px' });
             "#,
         );
-        assert_eq!(decisions, vec![Decision::Bail(BailReason::EffectfulValue)]);
+        assert_eq!(decisions, vec![Decision::Compilable { props_arg_idx: 0 }]);
+    }
+
+    #[test]
+    fn effectful_children_not_last_with_second_effectful_value_bails() {
+        // Now `onClick: g()` is a *second* effectful value (Data bucket),
+        // source-before the effectful `children` (Special bucket) — Data
+        // emits before Special, so source order (children, then onClick) is
+        // preserved... wait: source order here is `children` first, then
+        // `onClick`. Emitted order is Data (`onClick`) before Special
+        // (`children`) — a genuine reorder. Bails via `EffectfulReorder`.
+        let decisions = decisions_for(
+            r#"
+            import { Div } from '@meonode/ui';
+            Div({ children: [f()], onClick: g() });
+            "#,
+        );
+        assert_eq!(
+            decisions,
+            vec![Decision::Bail(BailReason::EffectfulReorder)]
+        );
     }
 
     #[test]
@@ -998,5 +1255,134 @@ mod tests {
             "#,
         );
         assert_eq!(decisions, vec![]);
+    }
+
+    // --- Change 4: `factoryModules` plugin config ---
+
+    fn mui_config() -> CompileConfig {
+        CompileConfig {
+            factory_modules: vec!["@meonode/mui".to_string()],
+        }
+    }
+
+    #[test]
+    fn capitalized_import_from_configured_module_is_compilable() {
+        let decisions = decisions_for_with_config(
+            r#"
+            import { Button } from '@meonode/mui';
+            Button({ padding: 1 });
+            "#,
+            &mui_config(),
+        );
+        assert_eq!(decisions, vec![Decision::Compilable { props_arg_idx: 0 }]);
+    }
+
+    #[test]
+    fn lowercase_import_from_configured_module_is_ignored() {
+        // `createMuiNode` is a helper export, not a component — it's simply
+        // not tracked at all, so calling it isn't a candidate call site (and
+        // doesn't need to be, since it's an internal implementation detail
+        // of `@meonode/mui`, never called directly by consumers per the
+        // v0.2 design doc).
+        let decisions = decisions_for_with_config(
+            r#"
+            import { createMuiNode, isProbablyMuiTheme } from '@meonode/mui';
+            createMuiNode('div', { padding: 1 });
+            isProbablyMuiTheme({ padding: 1 });
+            "#,
+            &mui_config(),
+        );
+        assert_eq!(decisions, vec![]);
+    }
+
+    #[test]
+    fn configured_module_import_without_config_is_ignored() {
+        // Same source as `capitalized_import_from_configured_module_is_compilable`,
+        // but with the default (empty) config — Change 4 is opt-in.
+        let decisions = decisions_for(
+            r#"
+            import { Button } from '@meonode/mui';
+            Button({ padding: 1 });
+            "#,
+        );
+        assert_eq!(decisions, vec![]);
+    }
+
+    #[test]
+    fn unconfigured_module_is_ignored_even_with_other_modules_configured() {
+        let decisions = decisions_for_with_config(
+            r#"
+            import { Button } from '@meonode/other-lib';
+            Button({ padding: 1 });
+            "#,
+            &mui_config(),
+        );
+        assert_eq!(decisions, vec![]);
+    }
+
+    #[test]
+    fn namespace_import_from_configured_module_bails() {
+        let decisions = decisions_for_with_config(
+            r#"
+            import * as Mui from '@meonode/mui';
+            Mui.Button({ padding: 1 });
+            "#,
+            &mui_config(),
+        );
+        assert_eq!(decisions, vec![Decision::Bail(BailReason::NamespaceImport)]);
+    }
+
+    #[test]
+    fn non_object_literal_arg_from_configured_module_bails() {
+        // Misidentification must degrade to a bail, never a rewrite: a
+        // non-object-literal first argument is never rewritten, exactly like
+        // any other factory.
+        let decisions = decisions_for_with_config(
+            r#"
+            import { Button } from '@meonode/mui';
+            const props = { padding: 1 };
+            Button(props);
+            "#,
+            &mui_config(),
+        );
+        assert_eq!(
+            decisions,
+            vec![Decision::Bail(BailReason::NotObjectLiteral)]
+        );
+    }
+
+    #[test]
+    fn aliased_capitalized_import_from_configured_module_is_compilable() {
+        let decisions = decisions_for_with_config(
+            r#"
+            import { Button as MuiButton } from '@meonode/mui';
+            MuiButton({ padding: 1 });
+            "#,
+            &mui_config(),
+        );
+        assert_eq!(decisions, vec![Decision::Compilable { props_arg_idx: 0 }]);
+    }
+
+    #[test]
+    fn multiple_configured_factory_modules_are_all_tracked() {
+        let config = CompileConfig {
+            factory_modules: vec!["@meonode/mui".to_string(), "@acme/widgets".to_string()],
+        };
+        let decisions = decisions_for_with_config(
+            r#"
+            import { Button } from '@meonode/mui';
+            import { Widget } from '@acme/widgets';
+            Button({ padding: 1 });
+            Widget({ padding: 2 });
+            "#,
+            &config,
+        );
+        assert_eq!(
+            decisions,
+            vec![
+                Decision::Compilable { props_arg_idx: 0 },
+                Decision::Compilable { props_arg_idx: 0 },
+            ]
+        );
     }
 }

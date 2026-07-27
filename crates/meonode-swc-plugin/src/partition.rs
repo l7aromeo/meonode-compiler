@@ -31,30 +31,13 @@ use swc_core::ecma::ast::*;
 use swc_core::ecma::atoms::Atom;
 use swc_core::ecma::visit::{VisitMut, VisitMutWith};
 
+use crate::config::CompileConfig;
 use crate::css_props::is_css_prop;
 use crate::detect::{self, Decision};
 use crate::effect::is_static_literal;
+use crate::keys::{is_special_key, key_name_atom};
 
 const MARKER_KEY: &str = "__meo$";
-
-/// Prop keys that always stay top-level, untouched by `c`/`d` bucketing, no
-/// matter what `is_css_prop` says about them (some, like `css` itself, would
-/// otherwise look unrelated to CSS but still need special runtime handling;
-/// `theme`/`as`/`disableEmotion` are meonode-specific config, not DOM props).
-const SPECIAL_KEYS: &[&str] = &[
-    "css",
-    "props",
-    "ref",
-    "key",
-    "children",
-    "as",
-    "theme",
-    "disableEmotion",
-];
-
-fn is_special_key(name: &str) -> bool {
-    SPECIAL_KEYS.contains(&name)
-}
 
 /// FNV-1a 64-bit hash (the standard offset basis / prime for the 64-bit
 /// variant). Chosen over a crate dependency since it's a handful of lines and
@@ -159,33 +142,29 @@ fn dyn_prop(names: Vec<Atom>) -> PropOrSpread {
     )
 }
 
-/// Extracts the name of an (already-validated) prop key. By the time a call
-/// site reaches this module it's `Decision::Compilable`, which means
-/// `detect::validate_object` has already rejected computed/numeric/bigint
-/// keys and non-identifier-like string keys — only `Ident` and identifier-
-/// like `Str` keys survive.
-fn prop_name_atom(key: &PropName) -> Atom {
-    match key {
-        PropName::Ident(id) => id.sym.clone(),
-        PropName::Str(s) => Atom::from(s.value.as_str().unwrap_or_default()),
-        _ => unreachable!(
-            "non-ident/str prop keys are rejected by detect::validate_object \
-             before a call site becomes Decision::Compilable"
-        ),
-    }
-}
-
-/// Partitions `obj`'s props into `__meo$`/`c`/`d`/`k`/`dyn` plus any special
-/// keys, and rewrites `obj.props` in place. `span` is the *call expression's*
-/// span (not the object literal's), matching Task 9's spec for `k`.
+/// Partitions `obj`'s props into `__meo$`/leading-spreads/`c`/`d`/`k`/`dyn`
+/// plus any special keys, and rewrites `obj.props` in place. `span` is the
+/// *call expression's* span (not the object literal's), matching Task 9's
+/// spec for `k`.
 ///
-/// Emit order: `__meo$`, `c` (omitted if empty), `d` (omitted if empty), `k`,
-/// `dyn` (omitted if empty), then every special-key prop in its original
-/// source order. Bucket membership: a non-special key goes to `c` if
-/// `css_props::is_css_prop` recognizes it, otherwise `d`. A bucketed prop's
-/// name is added to `dyn` unless its value is a "plain literal" per
-/// `effect::is_static_literal` (shorthand props are always dynamic, since
-/// their implicit value is an identifier).
+/// Emit order: `__meo$`, every leading `...spread` in its original relative
+/// order (Change 2 — `detect::validate_object` has already guaranteed every
+/// spread precedes every static prop, so none of this function's bucketing
+/// ever needs to reorder a spread relative to another spread), `c` (omitted
+/// if empty), `d` (omitted if empty), `k`, `dyn` (omitted if empty), then
+/// every special-key prop in its original source order. Bucket membership: a
+/// non-special key goes to `c` if `css_props::is_css_prop` recognizes it,
+/// otherwise `d`. A bucketed prop's name is added to `dyn` unless its value
+/// is a "plain literal" per `effect::is_static_literal` (shorthand props are
+/// always dynamic, since their implicit value is an identifier). A spread's
+/// own argument contributes no bucketed prop and no `dyn` name — its
+/// contents aren't known until runtime, so `@meonode/ui`'s
+/// `processProps` classifies them generically via its "passthrough" fast
+/// path (`getCSSProps`/`getDOMProps` over whatever the spread merges in),
+/// with the compiler-bucketed `c`/`d` static props applied on top —
+/// reproducing plain-JS "later key wins" semantics exactly (see the v0.2
+/// design doc's Change 2).
+///
 /// Appends `name` to `dyn_names` unless it's already there. A source object
 /// can legally repeat a key (`{ onClick: a, onClick: b }` — last one wins at
 /// runtime, same as any JS object literal, including once both copies land
@@ -204,14 +183,23 @@ fn push_dyn_name(dyn_names: &mut Vec<Atom>, name: Atom) {
 fn rewrite_object(obj: &mut ObjectLit, filename: &str, span: Span) {
     let old_props = mem::take(&mut obj.props);
 
+    let mut spreads: Vec<PropOrSpread> = Vec::new();
     let mut c_props: Vec<PropOrSpread> = Vec::new();
     let mut d_props: Vec<PropOrSpread> = Vec::new();
     let mut special_props: Vec<PropOrSpread> = Vec::new();
     let mut dyn_names: Vec<Atom> = Vec::new();
 
     for prop_or_spread in old_props {
-        let PropOrSpread::Prop(prop) = prop_or_spread else {
-            unreachable!("spread props are rejected by detect::validate_object");
+        let prop = match prop_or_spread {
+            // Leading spread (Change 2): `detect::validate_object` already
+            // guaranteed every spread precedes every static prop, so it's
+            // always safe to leave it exactly where it was — right after
+            // `__meo$` once every spread has been collected.
+            PropOrSpread::Spread(spread) => {
+                spreads.push(PropOrSpread::Spread(spread));
+                continue;
+            }
+            PropOrSpread::Prop(prop) => prop,
         };
 
         match &*prop {
@@ -231,7 +219,7 @@ fn rewrite_object(obj: &mut ObjectLit, filename: &str, span: Span) {
                 }
             }
             Prop::KeyValue(kv) => {
-                let name = prop_name_atom(&kv.key);
+                let name = key_name_atom(&kv.key);
                 if is_special_key(name.as_ref()) {
                     special_props.push(PropOrSpread::Prop(prop));
                     continue;
@@ -250,13 +238,15 @@ fn rewrite_object(obj: &mut ObjectLit, filename: &str, span: Span) {
     }
 
     let mut new_props = Vec::with_capacity(
-        3 + c_props.is_empty() as usize
+        3 + spreads.len()
+            + c_props.is_empty() as usize
             + d_props.is_empty() as usize
             + dyn_names.is_empty() as usize
             + special_props.len(),
     );
 
     new_props.push(marker_prop());
+    new_props.extend(spreads);
     if !c_props.is_empty() {
         new_props.push(bucket_prop("c", c_props));
     }
@@ -318,13 +308,14 @@ impl VisitMut for Rewriter<'_> {
 /// call site's props object literal into the pre-partitioned marker-prop
 /// shape (see module docs). `filename` is used to compute each call site's
 /// `k` value — pass the real source filename in production (see
-/// `lib.rs::process_transform`) or a fixed name in tests.
+/// `lib.rs::process_transform`) or a fixed name in tests. `config` carries
+/// Change 4's `factoryModules` list through to `detect::detect`.
 ///
 /// No-op (and skips the rewrite pass entirely) if there are no compilable
 /// call sites, so files untouched by @meonode/ui factories pay no additional
 /// traversal cost beyond detection itself.
-pub fn transform_program(program: &mut Program, filename: &str) {
-    let compilable: HashMap<(u32, u32), usize> = detect::detect(&*program)
+pub fn transform_program(program: &mut Program, filename: &str, config: &CompileConfig) {
+    let compilable: HashMap<(u32, u32), usize> = detect::detect(&*program, config)
         .into_iter()
         .filter_map(|d| match d.decision {
             Decision::Compilable { props_arg_idx } => {
@@ -357,11 +348,23 @@ mod tests {
     use swc_core::ecma::visit::{Visit, VisitWith};
 
     /// Parses `src`, runs the resolver (mirroring the real plugin host),
-    /// runs `transform_program`, then collects the object literal from the
-    /// first argument of every call expression, in traversal order. AST
-    /// inspection (rather than round-tripping through codegen text) keeps
-    /// these assertions independent of formatting/whitespace choices.
+    /// runs `transform_program` with the default (empty `factoryModules`)
+    /// config, then collects the object literal from the first argument of
+    /// every call expression, in traversal order. AST inspection (rather
+    /// than round-tripping through codegen text) keeps these assertions
+    /// independent of formatting/whitespace choices.
     fn transformed_objects(src: &str, filename: &str) -> Vec<ObjectLit> {
+        transformed_objects_with_config(src, filename, &CompileConfig::default())
+    }
+
+    /// Like [`transformed_objects`], but with a caller-supplied
+    /// [`CompileConfig`] — used to exercise Change 4's `factoryModules`
+    /// option end to end through the real rewrite pass.
+    fn transformed_objects_with_config(
+        src: &str,
+        filename: &str,
+        config: &CompileConfig,
+    ) -> Vec<ObjectLit> {
         GLOBALS.set(&Globals::new(), || {
             let cm: Lrc<SourceMap> = Default::default();
             let fm = cm.new_source_file(Lrc::new(FileName::Anon), src.to_string());
@@ -381,7 +384,7 @@ mod tests {
             let top_level_mark = Mark::new();
             program.visit_mut_with(&mut resolver(unresolved_mark, top_level_mark, false));
 
-            transform_program(&mut program, filename);
+            transform_program(&mut program, filename, config);
 
             struct Collector {
                 found: Vec<ObjectLit>,
@@ -771,5 +774,153 @@ mod tests {
         // object literal) but should only be listed once in `dyn`, in its
         // first-occurrence position.
         assert_eq!(dyn_names(&obj), vec!["onClick", "width"]);
+    }
+
+    // --- Change 2: leading spreads ---
+
+    #[test]
+    fn leading_spread_stays_top_level_right_after_marker() {
+        let obj = transformed_object(
+            r#"
+            import { Div } from '@meonode/ui';
+            const extra = {};
+            Div({ ...extra, padding: '8px' });
+            "#,
+            "test.tsx",
+        );
+        assert!(
+            matches!(&obj.props[0], PropOrSpread::Prop(_)),
+            "expected __meo$ first"
+        );
+        let PropOrSpread::Spread(spread) = &obj.props[1] else {
+            panic!(
+                "expected the spread to be the second emitted prop (right after __meo$), got {:?}",
+                obj.props[1]
+            );
+        };
+        let Expr::Ident(ident) = &*spread.expr else {
+            panic!("expected the spread argument to still be the bare `extra` identifier");
+        };
+        assert_eq!(ident.sym.as_ref(), "extra");
+
+        let Expr::Object(c) = find_prop(&obj, "c") else {
+            panic!("expected `c` bucket to exist");
+        };
+        assert!(has_prop(c, "padding"));
+    }
+
+    #[test]
+    fn multiple_leading_spreads_preserve_relative_order() {
+        let obj = transformed_object(
+            r#"
+            import { Div } from '@meonode/ui';
+            const a = {};
+            const b = {};
+            Div({ ...a, ...b, padding: '8px' });
+            "#,
+            "test.tsx",
+        );
+        let spread_names: Vec<String> = obj.props[1..3]
+            .iter()
+            .map(|p| {
+                let PropOrSpread::Spread(s) = p else {
+                    panic!("expected a spread entry, got {p:?}");
+                };
+                let Expr::Ident(id) = &*s.expr else {
+                    panic!("expected an identifier spread argument");
+                };
+                id.sym.as_ref().to_string()
+            })
+            .collect();
+        assert_eq!(spread_names, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn spread_only_props_emits_no_c_d_or_dyn() {
+        let obj = transformed_object(
+            r#"
+            import { Div } from '@meonode/ui';
+            const extra = {};
+            Div({ ...extra });
+            "#,
+            "test.tsx",
+        );
+        assert!(!has_prop(&obj, "c"));
+        assert!(!has_prop(&obj, "d"));
+        assert!(!has_prop(&obj, "dyn"));
+        let PropOrSpread::Spread(_) = &obj.props[1] else {
+            panic!(
+                "expected the spread to still be present, got {:?}",
+                obj.props[1]
+            );
+        };
+    }
+
+    // --- Change 3: quoted string keys ---
+
+    #[test]
+    fn quoted_non_identifier_key_is_bucketed_into_d_with_original_quoted_key() {
+        let obj = transformed_object(
+            r#"
+            import { Div } from '@meonode/ui';
+            Div({ padding: '4px', "data-parallax": "true" });
+            "#,
+            "test.tsx",
+        );
+        let Expr::Object(d) = find_prop(&obj, "d") else {
+            panic!("expected `d` bucket to exist");
+        };
+        let found = d.props.iter().any(|p| {
+            let PropOrSpread::Prop(prop) = p else {
+                return false;
+            };
+            let Prop::KeyValue(kv) = &**prop else {
+                return false;
+            };
+            matches!(&kv.key, PropName::Str(s) if s.value.as_str() == Some("data-parallax"))
+        });
+        assert!(
+            found,
+            "expected `data-parallax` to be bucketed into `d`, still keyed by its original quoted string"
+        );
+    }
+
+    // --- Change 4: `factoryModules` plugin config ---
+
+    #[test]
+    fn factory_module_call_site_is_rewritten_when_configured() {
+        let config = CompileConfig {
+            factory_modules: vec!["@meonode/mui".to_string()],
+        };
+        let mut objs = transformed_objects_with_config(
+            r#"
+            import { Button } from '@meonode/mui';
+            Button({ padding: '8px', onClick: handler });
+            "#,
+            "test.tsx",
+            &config,
+        );
+        assert_eq!(objs.len(), 1);
+        let obj = objs.remove(0);
+        assert!(has_prop(&obj, "__meo$"));
+        let Expr::Object(c) = find_prop(&obj, "c") else {
+            panic!("expected `c` bucket to exist");
+        };
+        assert!(has_prop(c, "padding"));
+    }
+
+    #[test]
+    fn factory_module_call_site_untouched_without_config() {
+        let obj = transformed_object(
+            r#"
+            import { Button } from '@meonode/mui';
+            Button({ padding: '8px' });
+            "#,
+            "test.tsx",
+        );
+        assert!(
+            !has_prop(&obj, "__meo$"),
+            "Button(...) must not be rewritten without factoryModules configured"
+        );
     }
 }

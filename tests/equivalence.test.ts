@@ -55,10 +55,10 @@ interface FixtureSpec {
   name: string
   /**
    * Whether the compiled variant is expected to contain the `__meo$` marker
-   * anywhere in its output. Every fixture except `bailout-spread` must
-   * compile at least one call site — this is the guard against the whole
-   * suite silently going vacuously green if the plugin (or its wiring here)
-   * started bailing on everything.
+   * anywhere in its output. Every fixture except `bailout-trailing-spread`
+   * must compile at least one call site — this is the guard against the
+   * whole suite silently going vacuously green if the plugin (or its wiring
+   * here) started bailing on everything.
    */
   expectMarker: boolean
 }
@@ -70,8 +70,12 @@ const FIXTURES: FixtureSpec[] = [
   { name: 'css-prop-merge', expectMarker: true },
   { name: 'custom-factory', expectMarker: true },
   { name: 'nested-children', expectMarker: true },
-  { name: 'bailout-spread', expectMarker: false },
   { name: 'as-polymorphism', expectMarker: true },
+  // v0.2: newly-compilable shapes (see the design doc's Change 1-3).
+  { name: 'leading-spread', expectMarker: true },
+  { name: 'bailout-trailing-spread', expectMarker: false },
+  { name: 'keyed-list', expectMarker: true },
+  { name: 'quoted-data-attribute', expectMarker: true },
 ]
 
 /**

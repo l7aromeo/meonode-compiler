@@ -109,38 +109,76 @@ build-time speedup.
 The plugin only rewrites a call site when it can *prove* the rewrite is
 evaluation-order-safe. Proof requires binding resolution (so a shadowed or
 re-exported local named e.g. `Div` isn't mistaken for the real import) and a
-structural check of the props object literal. Every prop value must be
-provably free of side effects (a literal, identifier, arrow/function
-expression, substitution-free template literal, or a nested object/array
-literal built entirely from those) — because the rewrite reorders evaluation
-(`c`-bucket props before `d`-bucket props, special keys moved to the tail).
-Anything else bails the *entire call site*, leaving it byte-for-byte as
-written; a bailed call behaves identically at runtime via `@meonode/ui`'s
-normal classification path.
+structural check of the props object literal.
+
+Rewriting reorders evaluation — `c`-bucket props before `d`-bucket props,
+special keys moved to the tail, any leading `...spread` left in place at the
+front — so a call only compiles when that reorder can't be observed. As of
+v0.2, the rule is no longer "every prop value must be side-effect-free": most
+values (literals, identifiers, arrow/function expressions, nested
+literal-only objects/arrays) can't observe or cause side effects and are
+freely repartitioned, but *effectful* values (calls, member access, `await`,
+`new`, assignments, conditionals, tagged templates, ...) must keep their
+relative order against every other effectful value. In practice this means:
+a call site with **zero or one** effectful prop value always compiles (the
+dominant real-world shape — `key: item.id` in a `.map()`, a single dynamic
+`backgroundColor`); a call site with two or more effectful values compiles
+only if compiling wouldn't reorder them relative to each other.
 
 | Condition | Compiles? | Notes |
 |---|---|---|
 | Plain object literal, all values literals/idents/arrows/nested literals | Yes | The common case |
-| `children` present and effectful, but last prop (or only prop) in source order | Yes | Special exception — see below |
+| At most one effectful prop value anywhere in the object | Yes | Trivially order-preserving — covers `key: item.id`, a single dynamic style, etc. |
+| Two+ effectful values whose relative order survives bucketing | Yes | E.g. `{ padding: g(), onClick: f() }` — both land in emit order matching source order |
+| Leading spread(s) (`{ ...props, padding: '8px' }`) | Yes | Spread stays top-level; only static props are bucketed — see below |
+| Non-identifier string key (`{ 'data-parallax': 1 }`) | Yes | Buckets normally, emitted with its original quoted key |
 | Callee is a shadowed/redeclared local, not the real `@meonode/ui` import | No (bail) | `ShadowedOrUnbound` |
 | Callee via namespace import (`import * as M from '@meonode/ui'; M.Div(...)`) | No (bail) | `NamespaceImport` |
 | No args, or nothing at the expected props argument position | No (bail) | `MissingPropsArg` |
 | Props argument isn't a plain object literal (identifier, call, ternary, member expr, spread arg) | No (bail) | `NotObjectLiteral` |
-| Object literal contains a spread property (`{ ...rest }`) | No (bail) | `SpreadProp` |
+| A spread appears *after* a static prop (`{ padding: 1, ...rest }`) | No (bail) | `TrailingSpread` — the spread would need to win, which the merge order can't express |
 | Object literal contains a spread argument *before* the props position (e.g. `P(...stuff, {...})`) | No (bail) | `SpreadBeforeProps` — runtime arg count isn't statically known |
 | Computed key (`{ [k]: v }`) | No (bail) | `ComputedKey` |
 | Numeric/bigint literal key | No (bail) | `NumericKey` |
-| Non-identifier-like string key (`{ 'foo-bar': 1 }`) | No (bail) | `NonIdentifierStringKey` |
 | Getter/setter accessor property | No (bail) | `GetterSetterProp` |
 | Shorthand method (`{ onClick() {} }`) | No (bail) | `MethodProp` |
-| Any prop value not provably side-effect-free (calls, member access, `await`, `new`, assignments, conditionals, tagged templates, ...) | No (bail) | `EffectfulValue` |
-| `children` effectful but **not** source-final | No (bail) | `EffectfulValue` — the tail-exception doesn't apply |
+| Two+ effectful values that would be reordered by compiling | No (bail) | `EffectfulReorder` — e.g. `{ onClick: f(), padding: g() }`, since `c` always emits before `d` |
 | Object literal already has a `__meo$` key | No (bail) | `ExistingMarker` — already compiled |
 
 Special keys (`css`, `props`, `ref`, `key`, `children`, `as`, `theme`,
 `disableEmotion`) are always left untouched at the top level of the emitted
 object — they're moved to the tail in their original relative order, but
-never bucketed into `c`/`d`.
+never bucketed into `c`/`d`. `key` and `children` in particular keep
+`@meonode/ui`'s runtime semantics byte-identical: compiling never changes
+how either is evaluated relative to the rest of the call.
+
+### `factoryModules` — recognizing wrapped factories
+
+Packages that wrap `Node()` in their own factory helper (e.g. `@meonode/mui`'s
+`createMuiNode`) are invisible to per-file detection, since detection only
+traces `@meonode/ui` imports and same-file `createNode`/
+`createChildrenFirstNode` bindings. Opt a wrapping package in via the plugin
+config:
+
+```js
+// Next.js
+experimental: {
+  swcPlugins: [['@meonode/compiler', { factoryModules: ['@meonode/mui'] }]],
+}
+
+// Vite
+react({ plugins: [['@meonode/compiler', { factoryModules: ['@meonode/mui'] }]] })
+```
+
+Every capitalized named import from a listed module (e.g. `Button`,
+`TextField`) is treated as a props-at-arg-0 factory, same as a plain
+`@meonode/ui` HTML factory. Lowercase named imports (helper functions, e.g.
+`createMuiNode`, `isProbablyMuiTheme`) are always ignored. Namespace imports
+from a listed module still bail (`NamespaceImport`), same as `@meonode/ui`'s.
+Misidentification degrades to a bail, never a rewrite: a non-object-literal
+first argument is never touched. A missing or malformed `factoryModules`
+config is equivalent to omitting it — no extra modules are recognized, and
+the build never fails because of it.
 
 ## Marker contract
 
@@ -280,6 +318,9 @@ crates/meonode-swc-plugin/
   src/lib.rs                        plugin entry point
   src/detect.rs                     call-site detection + bailout decisions
   src/effect.rs                     side-effect-freedom classifier
+  src/order.rs                      evaluation-order safety analysis (v0.2 rule)
+  src/keys.rs                       shared special-key / key-name utilities
+  src/config.rs                     plugin config (`factoryModules`)
   src/partition.rs                  prop partitioning + marker emission
   src/css_props.rs                  @generated — see Development
   src/factories.rs                  @generated — see Development
