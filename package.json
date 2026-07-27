@@ -9,21 +9,24 @@
     "build:wasm": "cargo build --release -p meonode-swc-plugin --target wasm32-wasip1 && cp target/wasm32-wasip1/release/meonode_swc_plugin.wasm npm/meonode_swc_plugin.wasm && cp README.md npm/README.md",
     "test": "vitest run",
     "test:e2e": "node e2e/scripts/run-e2e.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
     "release:dry": "semantic-release --dry-run"
   },
   "devDependencies": {
     "@emotion/cache": "^11.14.0",
     "@emotion/react": "^11.14.0",
-    "@meonode/ui": "1.7.0-beta.2",
+    "@meonode/ui": "^1.7.0",
     "@semantic-release/commit-analyzer": "^13.0.1",
     "@semantic-release/github": "^12.0.9",
     "@semantic-release/npm": "^13.1.5",
     "@semantic-release/release-notes-generator": "^14.1.1",
     "@swc/core": "^1.15",
+    "@types/node": "^26.1.2",
     "jsdom": "^29.1.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "semantic-release": "^25.0.5",
+    "typescript": "^6.0.3",
     "vitest": "^4"
   },
   "trustedDependencies": [

@@ -47,10 +47,14 @@ jobs:
         with:
           path: compiler
 
+      # `main`, not `beta`: `beta` is a stale release branch that lags behind
+      # shipped fixes (it was missing 1.7.0's ThemeProvider theme-vars fix),
+      # so drift-checking against it validates the compiler's CSS prop set
+      # against a tree users never receive.
       - uses: actions/checkout@v4
         with:
           repository: l7aromeo/meonode-ui
-          ref: beta
+          ref: main
           path: ui
 
       - name: Install bun
@@ -71,6 +75,12 @@ jobs:
       - name: CSS prop set + factory table drift check
         working-directory: compiler
         run: bun run check:drift
+
+      # Vitest strips types without checking them, so nothing else in CI would
+      # notice a type error in the test/codegen sources.
+      - name: Typecheck JS sources
+        working-directory: compiler
+        run: bun run typecheck
 
   wasm-smoke:
     runs-on: ubuntu-latest

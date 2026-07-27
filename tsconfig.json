@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "types": ["@types/node"],
+    "target": "ESNext",
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "noEmit": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "strict": true
+  },
+  "include": ["tests", "scripts", "e2e", "vitest.config.ts"],
+  "exclude": ["node_modules", "target", "npm/node_modules"]
+}
