@@ -339,33 +339,16 @@ beforehand as a belt-and-braces measure). Only `branches: ["main"]` is
 configured — no `beta`/`alpha` prerelease channels, unlike `ui`, since this
 package has no prerelease flow yet.
 
-**npm requires a package to already exist on the registry before trusted
-publishing can be configured for it.** That means the very first version,
-`0.1.0`, cannot go out through CI — it has to be published by hand once,
-after which every `0.1.x`/`0.2.0`/etc. release is fully automated from
-conventional commits on `main`. In order:
+Publishing is fully automated and armed. Every `feat`/`fix`/etc. conventional
+commit merged to `main` releases — no manual step, no token.
 
-1. **Manual bootstrap (one time only), by hand, locally:**
-   ```bash
-   bun run check:drift && bun run test   # must both pass first
-   npm login                              # as a user with publish rights on @meonode
-   cd npm
-   npm publish --access public            # publishes @meonode/compiler@0.1.0
-   ```
-2. **Configure npm trusted publishing** at
-   [npmjs.com](https://www.npmjs.com) → `@meonode/compiler` package →
-   Settings → Publishing access → add a trusted publisher: GitHub repo
-   `l7aromeo/meonode-compiler`, workflow `release.yml`, environment
-   `Production` (matching `release.yml`'s `environment:` — leave blank if you
-   didn't configure a GitHub Environment named `Production`).
-3. **Un-gate the workflow.** `release.yml`'s `release` job is gated behind a
-   repository variable so it can't attempt (and noisily fail) a publish
-   before steps 1–2 are done: Repo Settings → Secrets and variables →
-   Actions → Variables tab → New repository variable → name
-   `RELEASE_TRUSTED_PUBLISHING_READY`, value `true`.
+For historical context: npm requires a package to already exist on the registry
+before trusted publishing can be configured for it, so `0.1.0` was published by
+hand once, after which trusted publishing was configured on npmjs.com (GitHub
+repo `l7aromeo/meonode-compiler`, workflow `release.yml`, environment
+`Production`). That bootstrap is done and does not need repeating.
 
-After that, every `feat`/`fix`/etc. conventional commit merged to `main`
-triggers `release.yml`, which builds the wasm, runs `semantic-release`, bumps
+Each release run builds the wasm, runs `semantic-release`, bumps
 `npm/package.json`'s version, publishes via OIDC trusted publishing (no
 token), and creates the matching GitHub release — no further manual steps.
 
@@ -393,7 +376,7 @@ e2e/                                Next.js + Vite real-build parity fixtures
 scripts/                            codegen for css_props.rs / factories.rs
 .releaserc.json                     semantic-release config (pkgRoot: npm)
 .github/workflows/ci.yml            cargo test, wasm build, wasm smoke tests, e2e (gated)
-.github/workflows/release.yml       semantic-release + npm OIDC trusted publishing (gated, see Publishing)
+.github/workflows/release.yml       semantic-release + npm OIDC trusted publishing (see Publishing)
 ```
 
 ## License

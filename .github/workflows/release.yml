@@ -62,23 +62,6 @@ jobs:
     name: Release
     needs: [verify]
     runs-on: ubuntu-latest
-    # One-time gate: npm requires a package to already exist on the registry
-    # before OIDC trusted publishing can be configured for it, so
-    # @meonode/compiler@0.1.0 must be published manually first (see README >
-    # Development > Publishing). Until that manual bootstrap is done AND
-    # trusted publishing is configured on npmjs.com for this repo + this
-    # workflow file, letting this job run on every push to main would just
-    # fail noisily at the `npm publish` step every time a release-worthy
-    # commit lands. Gate it on a repository variable instead of a code change
-    # so un-gating after bootstrap is a one-click Settings change, not a PR:
-    #
-    #   Repo Settings > Secrets and variables > Actions > Variables tab >
-    #   New repository variable > name RELEASE_TRUSTED_PUBLISHING_READY,
-    #   value true
-    #
-    # Until that variable is set to "true", this job is skipped entirely
-    # (shows as skipped in the Actions UI, not failed) and nothing publishes.
-    if: vars.RELEASE_TRUSTED_PUBLISHING_READY == 'true'
     environment: Production
     concurrency:
       group: release-${{ github.ref }}
