@@ -4,14 +4,14 @@
 //! (see `detect.rs`) into `@meonode/ui`'s pre-partitioned marker-prop shape:
 //!
 //! ```text
-//! Div({ padding: '20px', width, onClick: handler, css: {...}, children: [A, B] })
+//! Div({ padding: 'theme.spacing.md', width, onClick: handler, css: {...}, children: [A, B] })
 //! // becomes:
 //! Div({
-//!   __meo$: 1,
-//!   c: { padding: '20px', width },
-//!   d: { onClick: handler },
-//!   k: 'm1a2b3c',
-//!   dyn: ['width', 'onClick'],
+//!   __meo$: 2,
+//!   __meo$c: { padding: 'var(--meonode-theme-spacing-md)', width },
+//!   __meo$d: { onClick: handler },
+//!   __meo$k: 'm1a2b3c',
+//!   __meo$dyn: ['width', 'onClick'],
 //!   css: {...},
 //!   children: [A, B],
 //! })
@@ -22,6 +22,11 @@
 //! `effect.rs`. This module only decides *where each already-accepted prop
 //! goes* and builds the replacement object literal; it never re-derives
 //! bail decisions.
+//!
+//! The one value *transformation* it performs is the `theme.*` ->
+//! `var(--meonode-theme-*)` rewrite (see `theme.rs`), applied to bucketed
+//! string-literal values only. Scope is deliberately narrow — see
+//! [`rewrite_theme_tokens_in_buckets`].
 
 use std::collections::HashMap;
 use std::mem;
@@ -36,6 +41,7 @@ use crate::css_props::is_css_prop;
 use crate::detect::{self, Decision};
 use crate::effect::is_static_literal;
 use crate::keys::{is_special_key, is_stable_key_visible_special, key_name_atom};
+use crate::theme::rewrite_theme_tokens;
 
 const MARKER_KEY: &str = "__meo$";
 /// Schema version emitted by this compiler. Schema 1 named its buckets `c`/`d`/
@@ -232,6 +238,75 @@ fn push_dyn_name(dyn_names: &mut Vec<Atom>, name: Atom) {
     }
 }
 
+/// Rewrites `theme.*` tokens to `var(--meonode-theme-*)` in the string-literal
+/// values of already-bucketed props (see `theme.rs` for why this is safe: the
+/// runtime performs the identical conversion on every render, so this only
+/// moves it earlier).
+///
+/// ## Why the scope is this narrow
+///
+/// Only **direct, bucketed, string-literal prop values** are eligible. Three
+/// deliberate exclusions:
+///
+/// - **Object keys are never touched.** A key like
+///   `'@media (max-width: theme.breakpoint.md)'` must resolve to a concrete
+///   value, because CSS variables are invalid inside media features and
+///   selector text. `@meonode/ui` documents this same invariant and defers key
+///   resolution to `resolveObjWithTheme`, which holds the live theme. Since
+///   this function only ever reads `kv.value`, the invariant holds structurally.
+///
+/// - **Special keys are skipped**, because they are never bucketed and so never
+///   reach this function. That matters most for `theme:` — rewriting tokens
+///   inside a *theme definition* would corrupt it, not optimize it — and it
+///   also means `css: {...}` blocks are left to the runtime. On the real
+///   `@meonode/ui` docs site only 42 of 758 token-bearing lines sit inside a
+///   nested object (`css:`, `props:`, selectors, media queries), so restricting
+///   to direct props still covers ~94% of tokens for a fraction of the surface.
+///
+/// - **No recursion into nested object/array literals**, and no template
+///   literals. A no-substitution template is value-equivalent to a string, but
+///   rewriting one means re-deriving its `raw` escaping to stay faithful; the
+///   runtime handles any token this pass leaves behind, so skipping is free.
+///
+/// Rewriting cannot affect bucket membership, `dyn` membership, or the stable
+/// key: a string literal stays a string literal, so `effect::is_static_literal`
+/// still holds and every decision made above this call is unchanged.
+fn rewrite_theme_tokens_in_buckets(buckets: [&mut Vec<PropOrSpread>; 2]) {
+    for bucket in buckets {
+        for prop_or_spread in bucket.iter_mut() {
+            let PropOrSpread::Prop(prop) = prop_or_spread else {
+                continue;
+            };
+            let Prop::KeyValue(kv) = &mut **prop else {
+                // Shorthand props carry an identifier value, never a literal.
+                continue;
+            };
+            let Expr::Lit(Lit::Str(str_lit)) = unwrap_parens_mut(&mut kv.value) else {
+                continue;
+            };
+            // `Str::value` is WTF-8, which can hold lone surrogates that have no
+            // `&str` form. `as_atom()` yields `Some` only for valid UTF-8, so a
+            // string containing an unpaired surrogate is left untouched (the
+            // runtime still handles any token in it). Computed before the
+            // mutation below so the immutable borrow ends first.
+            let rewritten = str_lit
+                .value
+                .as_atom()
+                .and_then(|atom| rewrite_theme_tokens(atom));
+
+            if let Some(rewritten) = rewritten {
+                str_lit.value = rewritten.into();
+                // Drop the original token so the emitted code carries the
+                // rewritten value. `raw` holds the source text verbatim
+                // (quotes included) and takes precedence over `value` when the
+                // codegen emits, so a stale `raw` would silently undo the whole
+                // rewrite.
+                str_lit.raw = None;
+            }
+        }
+    }
+}
+
 fn rewrite_object(obj: &mut ObjectLit, filename: &str, span: Span) {
     let old_props = mem::take(&mut obj.props);
     let has_spread = old_props
@@ -325,6 +400,11 @@ fn rewrite_object(obj: &mut ObjectLit, filename: &str, span: Span) {
             _ => unreachable!("only Shorthand/KeyValue props survive detect::validate_object"),
         }
     }
+
+    // Applied after bucketing rather than inline, so it reads as exactly what
+    // it is: a value transformation over the final bucket contents, incapable
+    // of influencing any placement decision made above.
+    rewrite_theme_tokens_in_buckets([&mut c_props, &mut d_props]);
 
     // A spread present means `k`/`dyn` are never emitted (stable-key hazard
     // — see doc comment above), regardless of whether `dyn_names` ended up
