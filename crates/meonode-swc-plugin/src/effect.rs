@@ -97,6 +97,28 @@ fn unwrap_parens(mut expr: &Expr) -> &Expr {
 /// This is a *strict subset* of [`is_effect_free`] — every static literal is
 /// effect-free, but not every effect-free value is static. Identifiers,
 /// function/arrow expressions, and nested object/array literals are all
+/// Whether an expression is an *inline function literal* written directly at
+/// the call site — an arrow or a function expression, not a reference to one.
+///
+/// Such a value never needs a `dyn` entry. `dyn` exists so the runtime folds a
+/// changing value into the stable key, but `NodeUtil._serializePropValue`
+/// hashes a function by its **source text** (`hashString(val.toString())`), and
+/// an inline literal's source is fixed by its call site. It therefore hashes to
+/// the same string on every render, contributing a constant that `__meo$k` —
+/// itself a call-site hash — already encodes.
+///
+/// Listing it anyway is pure cost: the runtime's function-hash memo is a
+/// `WeakMap` keyed by function *identity*, and an inline literal allocates a new
+/// object every render, so the memo never hits and every render pays
+/// `toString()` plus a hash, per handler, per node.
+///
+/// Deliberately narrow. A conditional (`cond ? a : b`), an identifier, a call
+/// returning a function, or a member expression can all yield *different*
+/// functions across renders, so those stay dynamic.
+pub fn is_inline_function(expr: &Expr) -> bool {
+    matches!(unwrap_parens(expr), Expr::Arrow(_) | Expr::Fn(_))
+}
+
 /// effect-free yet still count as dynamic here: an identifier needs a binding
 /// lookup, and Task 9's spec conservatively treats nested object/array
 /// literals as dynamic too (rather than trying to prove they're deeply
