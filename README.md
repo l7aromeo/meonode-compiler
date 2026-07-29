@@ -89,8 +89,17 @@ tokens per node overstated the gain by roughly 2x.
 Call sites the plugin can't safely prove are order-independent are left
 completely untouched (see [What gets compiled](#what-gets-compiled-vs-bailed)
 below) — they keep working exactly as before, through the runtime's normal
-classification path. Nothing about this plugin is required for correctness;
-it's purely a build-time speedup for the call sites it can prove are safe.
+classification path. The plugin is safe to add or remove at any time.
+
+It is mostly a build-time speedup, with one behavioural exception. `__meo$k` is
+derived from the call site's *source position*, whereas an uncompiled call site
+derives its element-cache key from props plus tree position. Two structurally
+identical memoized subtrees (nodes given a `deps` array) therefore compute the
+same key uncompiled, and one can be served the other's rendered output;
+compiled call sites cannot collide that way. This only affects nodes passing
+`deps` — nodes without it are never cached — and a distinct `key` prop is the
+uncompiled workaround. See
+[Memoization keys](https://ui.meonode.com/docs/getting-started/compiler#memoization-keys).
 
 ## Install & configure
 
