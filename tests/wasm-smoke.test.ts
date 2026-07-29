@@ -185,7 +185,6 @@ describe('wasm artifact smoke (@swc/core loading meonode_swc_plugin.wasm)', () =
             __meo$k: "m3ohe2cbdqutli",
             __meo$dyn: [
                 "width",
-                "onClick",
                 "color"
             ]
         });

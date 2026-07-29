@@ -11,7 +11,6 @@ Div({
     __meo$k: "m3vsbxklsb9qu",
     __meo$dyn: [
         "width",
-        "onClick",
         "color"
     ]
 });

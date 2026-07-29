@@ -38,6 +38,7 @@ use swc_core::ecma::visit::{VisitMut, VisitMutWith};
 
 use crate::config::CompileConfig;
 use crate::css_props::is_css_prop;
+use crate::effect::is_inline_function;
 use crate::detect::{self, Decision};
 use crate::effect::is_static_literal;
 use crate::keys::{is_special_key, is_stable_key_visible_special, key_name_atom};
@@ -376,6 +377,7 @@ fn rewrite_object(obj: &mut ObjectLit, filename: &str, span: Span) {
                     // c -> d -> top-level, which covers these.
                     if !has_spread
                         && !is_static_literal(&kv.value)
+                        && !is_inline_function(&kv.value)
                         && is_stable_key_visible_special(name.as_ref())
                     {
                         push_dyn_name(&mut dyn_names, name.clone());
@@ -388,7 +390,12 @@ fn rewrite_object(obj: &mut ObjectLit, filename: &str, span: Span) {
                     leading.push(PropOrSpread::Prop(prop));
                     continue;
                 }
-                if !is_static {
+                // An inline function literal is bucketed like any other dynamic
+                // value, but is deliberately kept out of `dyn`: the runtime
+                // hashes functions by source text, which is fixed by the call
+                // site, so it would only ever contribute a constant that `k`
+                // already covers. See `effect::is_inline_function`.
+                if !is_static && !is_inline_function(&kv.value) {
                     push_dyn_name(&mut dyn_names, name.clone());
                 }
                 if is_css_prop(name.as_ref()) {
@@ -744,6 +751,93 @@ mod tests {
         );
         assert!(!has_prop(&obj, "__meo$c"));
         assert!(has_prop(&obj, "__meo$d"));
+    }
+
+    /// Compiles a single `Div({...})` call and returns its emitted props object.
+    fn one_call(props_src: &str) -> ObjectLit {
+        transformed_object(
+            &format!("import {{ Div }} from '@meonode/ui';\nDiv({props_src});"),
+            "test.tsx",
+        )
+    }
+
+    /// The keys present in one emitted bucket (`__meo$c` / `__meo$d`).
+    fn bucket_keys(obj: &ObjectLit, bucket: &str) -> Vec<String> {
+        let Expr::Object(inner) = find_prop(obj, bucket) else {
+            panic!("expected `{bucket}` to be an object literal");
+        };
+        inner
+            .props
+            .iter()
+            .filter_map(|p| {
+                let PropOrSpread::Prop(prop) = p else { return None };
+                match &**prop {
+                    Prop::KeyValue(kv) => match &kv.key {
+                        PropName::Ident(id) => Some(id.sym.as_ref().to_string()),
+                        PropName::Str(st) => Some(st.value.as_str().unwrap().to_string()),
+                        _ => None,
+                    },
+                    Prop::Shorthand(id) => Some(id.sym.as_ref().to_string()),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn inline_arrow_is_bucketed_but_omitted_from_dyn() {
+        // The runtime hashes a function by source text, which is fixed by the
+        // call site, so listing it in `dyn` only buys a constant that `k`
+        // already encodes -- while costing a `toString()` and a hash per
+        // render, because the runtime's memo is keyed by function identity and
+        // an inline literal is a fresh object every render.
+        let obj = one_call("{ padding: '8px', onClick: () => {} }");
+        assert!(!has_prop(&obj, "__meo$dyn"));
+        assert!(bucket_keys(&obj, "__meo$d").contains(&"onClick".to_string()));
+    }
+
+    #[test]
+    fn inline_function_expression_is_also_omitted() {
+        let obj = one_call("{ onClick: function () {} }");
+        assert!(!has_prop(&obj, "__meo$dyn"));
+        assert!(bucket_keys(&obj, "__meo$d").contains(&"onClick".to_string()));
+    }
+
+    #[test]
+    fn parenthesized_inline_arrow_is_omitted() {
+        let obj = one_call("{ onClick: (() => {}) }");
+        assert!(!has_prop(&obj, "__meo$dyn"));
+    }
+
+    #[test]
+    fn function_reference_still_enters_dyn() {
+        // An identifier can resolve to a different function on a later render.
+        let obj = one_call("{ onClick: handler }");
+        assert_eq!(dyn_names(&obj), vec!["onClick"]);
+    }
+
+    #[test]
+    fn conditional_between_functions_still_enters_dyn() {
+        let obj = one_call("{ onClick: cond ? a : b }");
+        assert_eq!(dyn_names(&obj), vec!["onClick"]);
+    }
+
+    #[test]
+    fn call_returning_a_function_still_enters_dyn() {
+        let obj = one_call("{ onClick: makeHandler(id) }");
+        assert_eq!(dyn_names(&obj), vec!["onClick"]);
+    }
+
+    #[test]
+    fn inline_arrow_on_a_special_key_is_omitted_too() {
+        let obj = one_call("{ css: () => ({ color: 'red' }) }");
+        assert!(!has_prop(&obj, "__meo$dyn"));
+    }
+
+    #[test]
+    fn mixed_inline_and_referenced_handlers_keep_only_the_reference() {
+        let obj = one_call("{ onClick: () => {}, onBlur: handler, padding: '8px' }");
+        assert_eq!(dyn_names(&obj), vec!["onBlur"]);
     }
 
     #[test]
