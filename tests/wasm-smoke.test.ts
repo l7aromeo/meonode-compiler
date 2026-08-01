@@ -96,13 +96,33 @@ describe('wasm artifact smoke (@swc/core loading meonode_swc_plugin.wasm)', () =
     expect(code).toMatch(/onClick:\s*handler/);
   });
 
-  it('bails out (leaves the call untouched) on a trailing spread', async () => {
+  it('keys but does not partition a trailing spread', async () => {
+    // Partitioning is refused (`TrailingSpread`), so no `c`/`d` buckets — but
+    // the call-site key is a hash of filename and span and needs no knowledge
+    // of the props, so schema 3 is still stamped. Appended *after* the spread,
+    // so the spread cannot shadow it.
     const src =
       "import { Div } from '@meonode/ui'\nconst rest = {}\nDiv({ padding: 1, ...rest })\n";
     const code = await run(src);
 
-    expect(code).not.toContain('__meo$');
+    expect(code).toMatch(/__meo\$:\s*3/);
+    expect(code).toContain('__meo$k');
+    expect(code).not.toMatch(/__meo\$c:/);
+    expect(code).not.toMatch(/__meo\$d:/);
     expect(code).toContain('...rest');
+    // Order matters: marker after the spread.
+    expect(code.indexOf('...rest')).toBeLessThan(code.indexOf('__meo$'));
+  });
+
+  it('leaves a non-object-literal props argument completely untouched', async () => {
+    // The negative control, and the remaining gap: there is no object literal
+    // to append a marker to, so this call site keys off props exactly like an
+    // uncompiled one and can still collide with a structurally identical one
+    // elsewhere. `key` is the answer there.
+    const src = "import { Div } from '@meonode/ui'\nDiv(cond ? { padding: 1 } : { padding: 2 })\n";
+    const code = await run(src);
+
+    expect(code).not.toContain('__meo$');
   });
 
   it('compiles nested factory calls inside `children` independently', async () => {
@@ -211,7 +231,7 @@ describe('wasm artifact smoke (@swc/core loading meonode_swc_plugin.wasm)', () =
       `);
     });
 
-    it('matches snapshot for a bailout (trailing spread, untouched)', async () => {
+    it('matches snapshot for a key-only call site (trailing spread)', async () => {
       const code = await run(
         "import { Div } from '@meonode/ui'\nconst rest = {}\nDiv({ padding: 1, ...rest })\n",
         'snapshot-bailout.tsx',
@@ -221,7 +241,9 @@ describe('wasm artifact smoke (@swc/core loading meonode_swc_plugin.wasm)', () =
         const rest = {};
         Div({
             padding: 1,
-            ...rest
+            ...rest,
+            __meo$: 3,
+            __meo$k: "m1wgxf8d9tgibj"
         });
         "
       `);
