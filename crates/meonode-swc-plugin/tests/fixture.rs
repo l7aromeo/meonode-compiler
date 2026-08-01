@@ -309,10 +309,20 @@ fn transform_multiple_leading_spreads() {
 }
 
 #[test]
-fn transform_trailing_spread_bail() {
-    // A spread *after* a static prop still bails (`TrailingSpread`) — see
-    // `detect::tests::trailing_spread_bails`.
-    run_partition("transform_trailing_spread_bail");
+fn transform_trailing_spread_key_only() {
+    // A spread *after* a static prop still refuses partitioning
+    // (`TrailingSpread`) — see `detect::tests::trailing_spread_bails` — but the
+    // call site is now stamped with the schema 3 marker and call-site key.
+    // Note the marker lands *after* the spread, so the spread cannot shadow it.
+    run_partition("transform_trailing_spread_key_only");
+}
+
+#[test]
+fn transform_computed_key_key_only() {
+    // A computed key cannot be bucketed — the plugin cannot know the prop's
+    // name — but the call-site key does not depend on prop names at all, so the
+    // marker is still stamped.
+    run_partition("transform_computed_key_key_only");
 }
 
 #[test]
@@ -339,11 +349,13 @@ fn transform_two_effectful_order_preserved() {
 }
 
 #[test]
-fn transform_two_effectful_order_violated_bail() {
+fn transform_two_effectful_order_violated_key_only() {
     // `onClick` (Data, effectful) precedes `padding` (Css, effectful) in
-    // source, but emission always puts Css before Data — a genuine
-    // reordering, bails via `EffectfulReorder`.
-    run_partition("transform_two_effectful_order_violated_bail");
+    // source, but emission always puts Css before Data — a genuine reordering,
+    // so partitioning is refused via `EffectfulReorder`. The call site still
+    // gets the schema 3 marker and key: two constant literals appended last
+    // reorder nothing.
+    run_partition("transform_two_effectful_order_violated_key_only");
 }
 
 #[test]

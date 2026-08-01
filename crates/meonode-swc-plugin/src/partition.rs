@@ -54,6 +54,9 @@ const MARKER_SCHEMA: f64 = 2.0;
 const BUCKET_CSS_KEY: &str = "__meo$c";
 const BUCKET_DOM_KEY: &str = "__meo$d";
 const BUCKET_SITE_KEY: &str = "__meo$k";
+
+/// Schema emitted for call sites that get a key but no prop partitioning.
+const KEY_ONLY_SCHEMA: f64 = 3.0;
 const BUCKET_DYN_KEY: &str = "__meo$dyn";
 
 /// FNV-1a 64-bit hash (the standard offset basis / prime for the 64-bit
@@ -157,6 +160,32 @@ fn dyn_prop(names: Vec<Atom>) -> PropOrSpread {
             elems,
         }),
     )
+}
+
+/// Appends the schema 3 marker and call-site key to `obj`, leaving every
+/// existing prop untouched and in place.
+///
+/// Used for call sites that are genuine factory calls with an object-literal
+/// props argument, but which cannot be partitioned — a spread after static
+/// props, a computed or numeric key, an accessor or method prop, or an
+/// ordering constraint. Bucketing is refused there, but the call-site key is a
+/// hash of filename and span and needs no knowledge of the props, so it can
+/// still be stamped.
+///
+/// The two props are **appended**, not prepended. Appending puts them after any
+/// spread, so a spread can never shadow the marker, and two constant literals
+/// evaluated last change neither evaluation order nor any value — which is what
+/// makes this safe even on a call site that bailed *for* an ordering reason.
+fn stamp_call_site_key(obj: &mut ObjectLit, filename: &str, span: Span) {
+    obj.props.push(kv_prop(
+        MARKER_KEY,
+        Expr::Lit(Lit::Num(Number {
+            span: swc_core::common::DUMMY_SP,
+            value: KEY_ONLY_SCHEMA,
+            raw: None,
+        })),
+    ));
+    obj.props.push(key_prop(filename, span));
 }
 
 /// Partitions `obj`'s props into `__meo$`/leading-props/`c`/`d`/`k`/`dyn`
@@ -464,6 +493,10 @@ struct Rewriter<'a> {
     /// itself needn't implement `Hash`/`Eq` for this to work) to their
     /// props argument index.
     compilable: HashMap<(u32, u32), usize>,
+    /// Call sites that cannot be partitioned but can still be keyed. Same
+    /// mapping shape; rewritten by `stamp_call_site_key` instead of
+    /// `rewrite_object`.
+    key_only: HashMap<(u32, u32), usize>,
 }
 
 impl VisitMut for Rewriter<'_> {
@@ -476,8 +509,13 @@ impl VisitMut for Rewriter<'_> {
         call.visit_mut_children_with(self);
 
         let span = call.span;
-        let Some(&props_arg_idx) = self.compilable.get(&(span.lo.0, span.hi.0)) else {
-            return;
+        let key = (span.lo.0, span.hi.0);
+        let (props_arg_idx, partition) = match self.compilable.get(&key) {
+            Some(&idx) => (idx, true),
+            None => match self.key_only.get(&key) {
+                Some(&idx) => (idx, false),
+                None => return,
+            },
         };
         let Some(arg) = call.args.get_mut(props_arg_idx) else {
             return;
@@ -485,7 +523,11 @@ impl VisitMut for Rewriter<'_> {
         let Expr::Object(obj) = unwrap_parens_mut(&mut arg.expr) else {
             return;
         };
-        rewrite_object(obj, self.filename, span);
+        if partition {
+            rewrite_object(obj, self.filename, span);
+        } else {
+            stamp_call_site_key(obj, self.filename, span);
+        }
     }
 }
 
@@ -500,23 +542,30 @@ impl VisitMut for Rewriter<'_> {
 /// call sites, so files untouched by @meonode/ui factories pay no additional
 /// traversal cost beyond detection itself.
 pub fn transform_program(program: &mut Program, filename: &str, config: &CompileConfig) {
-    let compilable: HashMap<(u32, u32), usize> = detect::detect(&*program, config)
-        .into_iter()
-        .filter_map(|d| match d.decision {
-            Decision::Compilable { props_arg_idx } => {
-                Some(((d.span.lo.0, d.span.hi.0), props_arg_idx))
-            }
-            Decision::Bail(_) => None,
-        })
-        .collect();
+    let mut compilable: HashMap<(u32, u32), usize> = HashMap::new();
+    let mut key_only: HashMap<(u32, u32), usize> = HashMap::new();
 
-    if compilable.is_empty() {
+    for d in detect::detect(&*program, config) {
+        let span_key = (d.span.lo.0, d.span.hi.0);
+        match d.decision {
+            Decision::Compilable { props_arg_idx } => {
+                compilable.insert(span_key, props_arg_idx);
+            }
+            Decision::KeyOnly { props_arg_idx } => {
+                key_only.insert(span_key, props_arg_idx);
+            }
+            Decision::Bail(_) => {}
+        }
+    }
+
+    if compilable.is_empty() && key_only.is_empty() {
         return;
     }
 
     let mut rewriter = Rewriter {
         filename,
         compilable,
+        key_only,
     };
     program.visit_mut_with(&mut rewriter);
 }

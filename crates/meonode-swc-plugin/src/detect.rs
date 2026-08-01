@@ -184,6 +184,19 @@ pub enum Decision {
     /// object literal is at argument index `props_arg_idx`. Task 9 consumes
     /// this to drive the actual rewrite.
     Compilable { props_arg_idx: usize },
+    /// This call site is a genuine factory call whose props *are* an object
+    /// literal, but which cannot be partitioned — a spread after static props,
+    /// a computed or numeric key, an accessor or method prop, or an ordering
+    /// constraint. The props cannot be bucketed, but the call-site key can
+    /// still be stamped: it is a hash of filename and span and needs no
+    /// knowledge of the props at all.
+    ///
+    /// Emitted as schema 3 (see `@meonode/ui`'s `SUPPORTED_COMPILER_SCHEMAS`).
+    /// No performance benefit — the runtime classifies these props exactly as
+    /// it would an uncompiled call site — but the cache key gains a call-site
+    /// prefix, so two structurally identical memoized subtrees written in
+    /// different places stop colliding.
+    KeyOnly { props_arg_idx: usize },
     /// This call site is either not a factory call at all, or is one that
     /// can't (or shouldn't) be rewritten. See [`BailReason`] for why.
     Bail(BailReason),
@@ -476,10 +489,38 @@ fn classify_props(call: &CallExpr, props_arg_idx: usize) -> Decision {
 
     match unwrap_parens(&arg.expr) {
         Expr::Object(obj) => match validate_object(obj) {
+            Some(reason) if is_key_stampable(&reason) => Decision::KeyOnly { props_arg_idx },
             Some(reason) => Decision::Bail(reason),
             None => Decision::Compilable { props_arg_idx },
         },
         _ => Decision::Bail(BailReason::NotObjectLiteral),
+    }
+}
+
+/// Whether a bail reason still permits stamping the call-site key.
+///
+/// True for every reason that means "this object literal cannot be
+/// *partitioned*" — appending two constant marker props changes neither
+/// evaluation order nor any value, so it is safe regardless of why bucketing
+/// was refused.
+///
+/// False for [`BailReason::ExistingMarker`]: that call site already carries a
+/// marker, and stamping a second one would produce a contradictory contract.
+fn is_key_stampable(reason: &BailReason) -> bool {
+    match reason {
+        BailReason::TrailingSpread
+        | BailReason::ComputedKey
+        | BailReason::NumericKey
+        | BailReason::GetterSetterProp
+        | BailReason::MethodProp
+        | BailReason::UnsupportedPropKind
+        | BailReason::EffectfulReorder => true,
+        BailReason::ExistingMarker
+        | BailReason::ShadowedOrUnbound
+        | BailReason::NamespaceImport
+        | BailReason::MissingPropsArg
+        | BailReason::NotObjectLiteral
+        | BailReason::SpreadBeforeProps => false,
     }
 }
 
@@ -773,7 +814,7 @@ mod tests {
         "#;
         assert_eq!(
             decisions_for(src),
-            vec![Decision::Bail(BailReason::EffectfulReorder)]
+            vec![Decision::KeyOnly { props_arg_idx: 0 }]
         );
     }
 
@@ -786,7 +827,7 @@ mod tests {
         "#;
         assert_eq!(
             decisions_for(src),
-            vec![Decision::Bail(BailReason::EffectfulReorder)]
+            vec![Decision::KeyOnly { props_arg_idx: 0 }]
         );
     }
 
@@ -873,7 +914,7 @@ mod tests {
         "#;
         assert_eq!(
             decisions_for(src),
-            vec![Decision::Bail(BailReason::EffectfulReorder)]
+            vec![Decision::KeyOnly { props_arg_idx: 0 }]
         );
     }
 
@@ -1078,7 +1119,7 @@ mod tests {
             Div({ padding: 1, ...rest });
             "#,
         );
-        assert_eq!(decisions, vec![Decision::Bail(BailReason::TrailingSpread)]);
+        assert_eq!(decisions, vec![Decision::KeyOnly { props_arg_idx: 0 }]);
     }
 
     #[test]
@@ -1090,7 +1131,7 @@ mod tests {
             Div({ padding: 1, ...rest, color: 'red' });
             "#,
         );
-        assert_eq!(decisions, vec![Decision::Bail(BailReason::TrailingSpread)]);
+        assert_eq!(decisions, vec![Decision::KeyOnly { props_arg_idx: 0 }]);
     }
 
     #[test]
@@ -1153,7 +1194,7 @@ mod tests {
         );
         assert_eq!(
             decisions,
-            vec![Decision::Bail(BailReason::EffectfulReorder)]
+            vec![Decision::KeyOnly { props_arg_idx: 0 }]
         );
     }
 
@@ -1181,7 +1222,7 @@ mod tests {
             Div({ [key]: 1 });
             "#,
         );
-        assert_eq!(decisions, vec![Decision::Bail(BailReason::ComputedKey)]);
+        assert_eq!(decisions, vec![Decision::KeyOnly { props_arg_idx: 0 }]);
     }
 
     #[test]
@@ -1229,7 +1270,7 @@ mod tests {
             Div({ 0: 1 });
             "#,
         );
-        assert_eq!(decisions, vec![Decision::Bail(BailReason::NumericKey)]);
+        assert_eq!(decisions, vec![Decision::KeyOnly { props_arg_idx: 0 }]);
     }
 
     #[test]
@@ -1242,7 +1283,7 @@ mod tests {
         );
         assert_eq!(
             decisions,
-            vec![Decision::Bail(BailReason::GetterSetterProp)]
+            vec![Decision::KeyOnly { props_arg_idx: 0 }]
         );
     }
 
@@ -1254,7 +1295,7 @@ mod tests {
             Div({ onClick() {} });
             "#,
         );
-        assert_eq!(decisions, vec![Decision::Bail(BailReason::MethodProp)]);
+        assert_eq!(decisions, vec![Decision::KeyOnly { props_arg_idx: 0 }]);
     }
 
     #[test]
@@ -1393,7 +1434,7 @@ mod tests {
         );
         assert_eq!(
             decisions,
-            vec![Decision::Bail(BailReason::EffectfulReorder)]
+            vec![Decision::KeyOnly { props_arg_idx: 0 }]
         );
     }
 
@@ -1477,7 +1518,7 @@ mod tests {
         );
         assert_eq!(
             decisions,
-            vec![Decision::Bail(BailReason::EffectfulReorder)]
+            vec![Decision::KeyOnly { props_arg_idx: 0 }]
         );
     }
 

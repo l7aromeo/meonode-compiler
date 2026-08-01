@@ -55,10 +55,13 @@ interface FixtureSpec {
   name: string
   /**
    * Whether the compiled variant is expected to contain the `__meo$` marker
-   * anywhere in its output. Every fixture except `bailout-trailing-spread`
-   * must compile at least one call site — this is the guard against the
-   * whole suite silently going vacuously green if the plugin (or its wiring
-   * here) started bailing on everything.
+   * anywhere in its output. Every fixture except `bailout-non-literal-props`
+   * must be marked — this is the guard against the whole suite silently going
+   * vacuously green if the plugin (or its wiring here) started bailing on
+   * everything.
+   *
+   * Note `key-only-trailing-spread` is marked but not partitioned: it carries
+   * schema 3, a call-site key with no `c`/`d` buckets.
    */
   expectMarker: boolean
 }
@@ -73,7 +76,8 @@ const FIXTURES: FixtureSpec[] = [
   { name: 'as-polymorphism', expectMarker: true },
   // v0.2: newly-compilable shapes (see the design doc's Change 1-3).
   { name: 'leading-spread', expectMarker: true },
-  { name: 'bailout-trailing-spread', expectMarker: false },
+  { name: 'key-only-trailing-spread', expectMarker: true },
+  { name: 'bailout-non-literal-props', expectMarker: false },
   { name: 'keyed-list', expectMarker: true },
   { name: 'quoted-data-attribute', expectMarker: true },
   // v0.4: build-time theme-token rewriting, and the values-only boundary it
