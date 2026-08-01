@@ -52,7 +52,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: l7aromeo/meonode-ui
-          ref: main
+          # TEMPORARY — back to `main` once 1.8.6 is stable. `export:css-props
+          # --length`, which the length-property codegen needs, ships in 1.8.6.
+          ref: beta
           path: ui
 
       - name: Install bun

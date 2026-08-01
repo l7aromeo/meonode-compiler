@@ -86,6 +86,22 @@ function main() {
   // The length set decides which declarations reference the paired `--len`
   // theme variable. It must be a subset of the CSS set, or the plugin would
   // treat something as a length that it does not even recognise as a CSS prop.
+  // An @meonode/ui old enough to predate the `--length` flag ignores the
+  // unknown argument and prints its full property list, which would silently
+  // generate every CSS property as a length property — every themed
+  // declaration would then reference a `--len` variable that mostly does not
+  // exist. Identical sets mean the flag was not understood.
+  if (
+    lengthProps.length === props.length &&
+    lengthProps.every((p, i) => p === props[i])
+  ) {
+    throw new Error(
+      "`export:css-props --length` returned the full property set, which means " +
+        "the @meonode/ui checkout predates that flag. Point MEONODE_UI_DIR at a " +
+        "version that supports it (>= 1.8.6).",
+    );
+  }
+
   const cssSet = new Set(props);
   const orphans = lengthProps.filter((p) => !cssSet.has(p));
   if (orphans.length > 0) {
