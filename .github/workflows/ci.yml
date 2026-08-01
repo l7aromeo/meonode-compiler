@@ -35,11 +35,9 @@ jobs:
   # `cargo test` in `test` needs. Keeping them apart means `test` stays a
   # fast Rust-only job and this one doesn't touch the Rust toolchain at all.
   #
-  # Checked out at `ref: beta`, same as the `e2e` job below: ui's
-  # `export:css-props` script (scripts/export-css-properties.ts), which this
-  # job's `bun run check:drift` shells out to, only exists on that branch —
-  # `error: Script not found "export:css-props"` against ui's default branch.
-  # Move this to ui's default branch once it merges there.
+  # Checked out at `ref: main`: ui's `export:css-props` script
+  # (scripts/export-css-properties.ts), which this job's `bun run check:drift`
+  # shells out to, now lives on ui's default branch.
   css-drift:
     runs-on: ubuntu-latest
     steps:

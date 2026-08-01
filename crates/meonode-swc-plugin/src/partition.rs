@@ -37,12 +37,12 @@ use swc_core::ecma::atoms::Atom;
 use swc_core::ecma::visit::{VisitMut, VisitMutWith};
 
 use crate::config::CompileConfig;
-use crate::css_props::is_css_prop;
+use crate::css_props::{is_css_prop, is_length_prop};
 use crate::effect::is_inline_function;
 use crate::detect::{self, Decision};
 use crate::effect::is_static_literal;
 use crate::keys::{is_special_key, is_stable_key_visible_special, key_name_atom};
-use crate::theme::rewrite_theme_tokens;
+use crate::theme::rewrite_theme_tokens_for;
 
 const MARKER_KEY: &str = "__meo$";
 /// Schema version emitted by this compiler. Schema 1 named its buckets `c`/`d`/
@@ -311,6 +311,17 @@ fn rewrite_theme_tokens_in_buckets(buckets: [&mut Vec<PropOrSpread>; 2]) {
                 // Shorthand props carry an identifier value, never a literal.
                 continue;
             };
+            // The property name decides whether the token needs its unit.
+            // Read before the mutable borrow of `kv.value` below.
+            let wants_length = match &kv.key {
+                PropName::Ident(id) => is_length_prop(id.sym.as_ref()),
+                PropName::Str(st) => st
+                    .value
+                    .as_atom()
+                    .is_some_and(|atom| is_length_prop(atom.as_ref())),
+                _ => false,
+            };
+
             let Expr::Lit(Lit::Str(str_lit)) = unwrap_parens_mut(&mut kv.value) else {
                 continue;
             };
@@ -322,7 +333,7 @@ fn rewrite_theme_tokens_in_buckets(buckets: [&mut Vec<PropOrSpread>; 2]) {
             let rewritten = str_lit
                 .value
                 .as_atom()
-                .and_then(|atom| rewrite_theme_tokens(atom));
+                .and_then(|atom| rewrite_theme_tokens_for(atom, wants_length));
 
             if let Some(rewritten) = rewritten {
                 str_lit.value = rewritten.into();

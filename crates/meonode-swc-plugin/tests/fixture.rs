@@ -217,6 +217,15 @@ fn transform_dynamic_values() {
     run_partition("transform_dynamic_values");
 }
 
+/// Length-valued properties reference the paired `--len` theme variable so a
+/// numeric token arrives with its unit; everything else keeps the plain
+/// variable. The runtime makes the identical choice from the identical
+/// generated set, so compiled and uncompiled output stay byte-identical.
+#[test]
+fn transform_theme_length_tokens() {
+    run_partition("transform_theme_length_tokens");
+}
+
 #[test]
 fn transform_special_keys() {
     run_partition("transform_special_keys");
