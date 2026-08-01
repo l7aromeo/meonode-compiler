@@ -706,6 +706,249 @@ pub fn is_css_prop(name: &str) -> bool {
     CSS_PROPS.binary_search(&name).is_ok()
 }
 
+/// Properties whose value is a length, where a bare number is invalid.
+///
+/// A theme token used for one of these is rewritten to
+/// `var(--x--len, var(--x))` so a numeric token value arrives with its unit.
+/// The runtime makes the identical choice from the identical set, which is why
+/// this is generated rather than hand-maintained: a disagreement would emit a
+/// reference to a variable the other side never defined, and the browser drops
+/// such a declaration silently.
+///
+/// Derived in `@meonode/ui` as the properties `csstype` parameterises by
+/// `TLength`, intersected with the CSS property set above, minus
+/// `@emotion/unitless`. That last subtraction keeps `lineHeight`, `flex`,
+/// `tabSize` and `strokeWidth` out: they accept a length *and* a bare number,
+/// and there the bare number is what the author meant.
+pub static LENGTH_PROPS: &[&str] = &[
+    "MozBorderEndWidth",
+    "MozColumnRule",
+    "MozColumnRuleWidth",
+    "MozColumnWidth",
+    "MozColumns",
+    "MozMarginEnd",
+    "MozMarginStart",
+    "MozOsxFontSmoothing",
+    "MozOutlineRadius",
+    "MozOutlineRadiusBottomleft",
+    "MozOutlineRadiusBottomright",
+    "MozOutlineRadiusTopleft",
+    "MozOutlineRadiusTopright",
+    "MozPaddingEnd",
+    "MozPaddingStart",
+    "MozTabSize",
+    "WebkitBackgroundSize",
+    "WebkitBorderBefore",
+    "WebkitBorderBeforeWidth",
+    "WebkitBorderBottomLeftRadius",
+    "WebkitBorderBottomRightRadius",
+    "WebkitBorderRadius",
+    "WebkitBorderTopLeftRadius",
+    "WebkitBorderTopRightRadius",
+    "WebkitBoxReflect",
+    "WebkitColumnRule",
+    "WebkitColumnRuleWidth",
+    "WebkitColumnWidth",
+    "WebkitColumns",
+    "WebkitFlex",
+    "WebkitFlexBasis",
+    "WebkitFontSmoothing",
+    "WebkitMarginEnd",
+    "WebkitMarginStart",
+    "WebkitMask",
+    "WebkitMaskBoxImageOutset",
+    "WebkitMaskBoxImageWidth",
+    "WebkitMaskPosition",
+    "WebkitMaskPositionX",
+    "WebkitMaskPositionY",
+    "WebkitMaskSize",
+    "WebkitMaxInlineSize",
+    "WebkitPaddingEnd",
+    "WebkitPaddingStart",
+    "WebkitPerspective",
+    "WebkitPerspectiveOrigin",
+    "WebkitShapeMargin",
+    "WebkitTextStroke",
+    "WebkitTextStrokeWidth",
+    "WebkitTransformOrigin",
+    "animationRange",
+    "animationRangeEnd",
+    "animationRangeStart",
+    "background",
+    "backgroundPosition",
+    "backgroundPositionX",
+    "backgroundPositionY",
+    "backgroundSize",
+    "blockSize",
+    "border",
+    "borderBlock",
+    "borderBlockEnd",
+    "borderBlockEndWidth",
+    "borderBlockStart",
+    "borderBlockStartWidth",
+    "borderBlockWidth",
+    "borderBottom",
+    "borderBottomLeftRadius",
+    "borderBottomRightRadius",
+    "borderBottomWidth",
+    "borderEndEndRadius",
+    "borderEndStartRadius",
+    "borderInline",
+    "borderInlineEnd",
+    "borderInlineEndWidth",
+    "borderInlineStart",
+    "borderInlineStartWidth",
+    "borderInlineWidth",
+    "borderLeft",
+    "borderLeftWidth",
+    "borderRadius",
+    "borderRight",
+    "borderRightWidth",
+    "borderSpacing",
+    "borderStartEndRadius",
+    "borderStartStartRadius",
+    "borderTop",
+    "borderTopLeftRadius",
+    "borderTopRightRadius",
+    "borderTopWidth",
+    "borderWidth",
+    "bottom",
+    "columnGap",
+    "columnRule",
+    "columnRuleWidth",
+    "columnWidth",
+    "containIntrinsicBlockSize",
+    "containIntrinsicHeight",
+    "containIntrinsicInlineSize",
+    "containIntrinsicSize",
+    "containIntrinsicWidth",
+    "flexBasis",
+    "fontSize",
+    "fontSmooth",
+    "gap",
+    "gridAutoColumns",
+    "gridAutoRows",
+    "gridTemplateColumns",
+    "gridTemplateRows",
+    "height",
+    "inlineSize",
+    "inset",
+    "insetBlock",
+    "insetBlockEnd",
+    "insetBlockStart",
+    "insetInline",
+    "insetInlineEnd",
+    "insetInlineStart",
+    "left",
+    "letterSpacing",
+    "lineHeightStep",
+    "margin",
+    "marginBlock",
+    "marginBlockEnd",
+    "marginBlockStart",
+    "marginBottom",
+    "marginInline",
+    "marginInlineEnd",
+    "marginInlineStart",
+    "marginLeft",
+    "marginRight",
+    "marginTop",
+    "mask",
+    "maskBorderOutset",
+    "maskBorderWidth",
+    "maskPosition",
+    "maskSize",
+    "maxBlockSize",
+    "maxHeight",
+    "maxInlineSize",
+    "maxWidth",
+    "minBlockSize",
+    "minHeight",
+    "minInlineSize",
+    "minWidth",
+    "motion",
+    "motionDistance",
+    "msFlex",
+    "msGridColumns",
+    "msGridRows",
+    "msHyphenateLimitZone",
+    "msScrollLimitXMax",
+    "msScrollLimitXMin",
+    "msScrollLimitYMax",
+    "msScrollLimitYMin",
+    "msTransformOrigin",
+    "msWrapMargin",
+    "objectPosition",
+    "offset",
+    "offsetAnchor",
+    "offsetDistance",
+    "offsetPosition",
+    "outline",
+    "outlineOffset",
+    "outlineWidth",
+    "overflowClipMargin",
+    "padding",
+    "paddingBlock",
+    "paddingBlockEnd",
+    "paddingBlockStart",
+    "paddingBottom",
+    "paddingInline",
+    "paddingInlineEnd",
+    "paddingInlineStart",
+    "paddingLeft",
+    "paddingRight",
+    "paddingTop",
+    "perspective",
+    "perspectiveOrigin",
+    "right",
+    "rowGap",
+    "scrollMargin",
+    "scrollMarginBlock",
+    "scrollMarginBlockEnd",
+    "scrollMarginBlockStart",
+    "scrollMarginBottom",
+    "scrollMarginInline",
+    "scrollMarginInlineEnd",
+    "scrollMarginInlineStart",
+    "scrollMarginLeft",
+    "scrollMarginRight",
+    "scrollMarginTop",
+    "scrollPadding",
+    "scrollPaddingBlock",
+    "scrollPaddingBlockEnd",
+    "scrollPaddingBlockStart",
+    "scrollPaddingBottom",
+    "scrollPaddingInline",
+    "scrollPaddingInlineEnd",
+    "scrollPaddingInlineStart",
+    "scrollPaddingLeft",
+    "scrollPaddingRight",
+    "scrollPaddingTop",
+    "scrollSnapMargin",
+    "scrollSnapMarginBottom",
+    "scrollSnapMarginLeft",
+    "scrollSnapMarginRight",
+    "scrollSnapMarginTop",
+    "shapeMargin",
+    "textDecoration",
+    "textDecorationThickness",
+    "textIndent",
+    "textUnderlineOffset",
+    "top",
+    "transformOrigin",
+    "translate",
+    "verticalAlign",
+    "viewTimelineInset",
+    "width",
+    "wordSpacing",
+];
+
+/// Returns true if `name` is a length-valued CSS property, i.e. one where a
+/// theme token must carry a unit.
+pub fn is_length_prop(name: &str) -> bool {
+    LENGTH_PROPS.binary_search(&name).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -731,5 +974,40 @@ mod tests {
     #[test]
     fn rejects_non_css_props() {
         assert!(!is_css_prop("id"));
+    }
+
+    #[test]
+    fn length_props_is_sorted() {
+        assert!(
+            LENGTH_PROPS.windows(2).all(|w| w[0] < w[1]),
+            "LENGTH_PROPS must be strictly sorted in byte order for binary_search to work"
+        );
+    }
+
+    #[test]
+    fn length_props_is_a_subset_of_css_props() {
+        for name in LENGTH_PROPS {
+            assert!(
+                is_css_prop(name),
+                "{name} is a length property but not a recognized CSS property"
+            );
+        }
+    }
+
+    #[test]
+    fn recognizes_length_props() {
+        assert!(is_length_prop("padding"));
+        assert!(is_length_prop("borderRadius"));
+    }
+
+    #[test]
+    fn rejects_properties_where_a_bare_number_is_meaningful() {
+        // Accept a length *and* a bare number; the bare number is the intent.
+        assert!(!is_length_prop("lineHeight"));
+        assert!(!is_length_prop("flex"));
+        assert!(!is_length_prop("tabSize"));
+        // Purely unitless.
+        assert!(!is_length_prop("zIndex"));
+        assert!(!is_length_prop("opacity"));
     }
 }

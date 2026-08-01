@@ -2,7 +2,7 @@
   "name": "@meonode/compiler-repo",
   "version": "0.0.1",
   "private": true,
-  "description": "Repo-root tooling scripts for @meonode/compiler (codegen, drift checks). Not published — see npm/package.json for the published package.",
+  "description": "Repo-root tooling scripts for @meonode/compiler (codegen, drift checks). Not published \u2014 see npm/package.json for the published package.",
   "scripts": {
     "codegen": "bun run scripts/codegen-css-set.ts && bun run scripts/codegen-factories.ts",
     "check:drift": "bun run scripts/codegen-css-set.ts && bun run scripts/codegen-factories.ts && git diff --exit-code crates/meonode-swc-plugin/src/css_props.rs crates/meonode-swc-plugin/src/factories.rs",
@@ -15,7 +15,7 @@
   "devDependencies": {
     "@emotion/cache": "^11.14.0",
     "@emotion/react": "^11.14.0",
-    "@meonode/ui": "^1.8.0",
+    "@meonode/ui": "^1.8.6",
     "@semantic-release/commit-analyzer": "^13.0.1",
     "@semantic-release/github": "^12.0.9",
     "@semantic-release/npm": "^13.1.5",

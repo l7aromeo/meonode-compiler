@@ -128,6 +128,25 @@ fn is_theme_path_char(ch: char) -> bool {
 /// the capture group requires one or more characters — matching the runtime,
 /// where `'theme.'` is left alone.
 pub fn rewrite_theme_tokens(input: &str) -> Option<String> {
+    rewrite_theme_tokens_for(input, false)
+}
+
+/// Same as [`rewrite_theme_tokens`], but emits the paired length form when
+/// `wants_length` is set.
+///
+/// A theme value reaches CSS as the text of a custom property, and Emotion
+/// never inspects a custom property's contents — so a token holding a bare
+/// number would emit `padding: 16`, which is not a valid length and is
+/// dropped. For length-valued properties the runtime and this pass both emit
+/// `var(--x--len, var(--x))`, where `--x--len` is defined only for numeric
+/// token values and the fallback covers everything else.
+///
+/// The choice is made from the property name alone, never the token's value,
+/// which is what lets this run at build time with no theme in scope and still
+/// produce byte-identical output to the runtime.
+/// @param input The string that may contain `theme.*` tokens.
+/// @param wants_length Whether the enclosing property takes a length.
+pub fn rewrite_theme_tokens_for(input: &str, wants_length: bool) -> Option<String> {
     // Cheap reject first: the overwhelming majority of prop values contain no
     // token at all, and this mirrors the runtime's own `includes` guard.
     if !input.contains("theme.") {
@@ -151,9 +170,21 @@ pub fn rewrite_theme_tokens(input: &str) -> Option<String> {
                 .map_or(bytes.len(), |(offset, _)| path_start + offset);
 
             if path_end > path_start {
-                out.push_str("var(");
-                out.push_str(&to_theme_var_name(&input[path_start..path_end]));
-                out.push(')');
+                let var_name = to_theme_var_name(&input[path_start..path_end]);
+                if wants_length {
+                    // `var(--x--len, var(--x))` — the fallback means no
+                    // `--len` needs to exist for colours or already-united
+                    // values; they resolve through to the plain variable.
+                    out.push_str("var(");
+                    out.push_str(&var_name);
+                    out.push_str("--len, var(");
+                    out.push_str(&var_name);
+                    out.push_str("))");
+                } else {
+                    out.push_str("var(");
+                    out.push_str(&var_name);
+                    out.push(')');
+                }
                 matched = true;
                 i = path_end;
                 continue;
@@ -204,6 +235,49 @@ mod tests {
         // behave like the JS `[^\w.-]` replacement if a caller ever widens.
         assert_eq!(to_theme_var_name("a b"), "--meonode-theme-a-b");
         assert_eq!(to_theme_var_name("café"), "--meonode-theme-caf-");
+    }
+
+    #[test]
+    fn length_form_emits_the_paired_variable_with_a_fallback() {
+        assert_eq!(
+            rewrite_theme_tokens_for("theme.spacing.md", true).as_deref(),
+            Some("var(--meonode-theme-spacing-md--len, var(--meonode-theme-spacing-md))")
+        );
+    }
+
+    #[test]
+    fn non_length_form_is_unchanged() {
+        assert_eq!(
+            rewrite_theme_tokens_for("theme.primary", false).as_deref(),
+            Some("var(--meonode-theme-primary)")
+        );
+    }
+
+    #[test]
+    fn length_form_applies_to_every_token_in_a_shorthand() {
+        assert_eq!(
+            rewrite_theme_tokens_for("theme.spacing.sm theme.spacing.md", true).as_deref(),
+            Some(
+                "var(--meonode-theme-spacing-sm--len, var(--meonode-theme-spacing-sm)) \
+                 var(--meonode-theme-spacing-md--len, var(--meonode-theme-spacing-md))"
+            )
+        );
+    }
+
+    #[test]
+    fn length_form_leaves_a_colour_inside_a_shorthand_resolvable() {
+        // `--base-deep--len` is never defined for a colour, so the fallback
+        // resolves it. Emitting the length form here is therefore harmless.
+        assert_eq!(
+            rewrite_theme_tokens_for("1px solid theme.base.deep", true).as_deref(),
+            Some("1px solid var(--meonode-theme-base-deep--len, var(--meonode-theme-base-deep))")
+        );
+    }
+
+    #[test]
+    fn returns_none_for_token_free_input_in_either_form() {
+        assert_eq!(rewrite_theme_tokens_for("16px", true), None);
+        assert_eq!(rewrite_theme_tokens_for("16px", false), None);
     }
 
     #[test]

@@ -31,36 +31,85 @@ const OUT_PATH = join(
   "crates/meonode-swc-plugin/src/css_props.rs",
 );
 
+/**
+ * Runs @meonode/ui's export script and returns the completed process.
+ *
+ * `bun run` writes its `$ <command>` banner to stderr, so stdout is pure JSON.
+ * @param uiDir The @meonode/ui checkout.
+ * @param args Extra arguments forwarded to the export script.
+ */
+function runExport(uiDir: string, args: string[]) {
+  const label = ["export:css-props", ...args].join(" ");
+  const result = spawnSync("bun", ["run", "export:css-props", ...args], {
+    cwd: uiDir,
+    encoding: "utf8",
+  });
+  if (result.error) {
+    throw new Error(
+      `Failed to spawn \`bun run ${label}\` in ${uiDir}: ${result.error.message}`,
+    );
+  }
+  if (result.status !== 0) {
+    throw new Error(
+      `\`bun run ${label}\` in ${uiDir} exited with status ${result.status}.\n` +
+        `stdout: ${result.stdout}\nstderr: ${result.stderr}`,
+    );
+  }
+  return result;
+}
+
+/**
+ * Parses one export script's stdout into a string array.
+ * @param stdout Raw stdout.
+ * @param label Command label, for error messages.
+ */
+function parseProps(stdout: string, label: string): string[] {
+  const raw: unknown = JSON.parse(stdout);
+  if (!Array.isArray(raw) || !raw.every((x) => typeof x === "string")) {
+    throw new Error(`Expected \`bun run ${label}\` to print a JSON array of strings.`);
+  }
+  return raw as string[];
+}
+
 function main() {
   const uiDir = resolve(
     REPO_ROOT,
     process.env.MEONODE_UI_DIR ?? "../ui",
   );
 
-  const result = spawnSync("bun", ["run", "export:css-props"], {
-    cwd: uiDir,
-    encoding: "utf8",
-  });
+  const result = runExport(uiDir, []);
+  const lengthResult = runExport(uiDir, ["--length"]);
 
-  if (result.error) {
+  const props = parseProps(result.stdout, "export:css-props");
+  const lengthProps = parseProps(lengthResult.stdout, "export:css-props --length");
+
+  // The length set decides which declarations reference the paired `--len`
+  // theme variable. It must be a subset of the CSS set, or the plugin would
+  // treat something as a length that it does not even recognise as a CSS prop.
+  // An @meonode/ui old enough to predate the `--length` flag ignores the
+  // unknown argument and prints its full property list, which would silently
+  // generate every CSS property as a length property — every themed
+  // declaration would then reference a `--len` variable that mostly does not
+  // exist. Identical sets mean the flag was not understood.
+  if (
+    lengthProps.length === props.length &&
+    lengthProps.every((p, i) => p === props[i])
+  ) {
     throw new Error(
-      `Failed to spawn \`bun run export:css-props\` in ${uiDir}: ${result.error.message}`,
-    );
-  }
-  if (result.status !== 0) {
-    throw new Error(
-      `\`bun run export:css-props\` in ${uiDir} exited with status ${result.status}.\n` +
-        `stdout: ${result.stdout}\nstderr: ${result.stderr}`,
+      "`export:css-props --length` returned the full property set, which means " +
+        "the @meonode/ui checkout predates that flag. Point MEONODE_UI_DIR at a " +
+        "version that supports it (>= 1.8.6).",
     );
   }
 
-  const raw: unknown = JSON.parse(result.stdout);
-  if (!Array.isArray(raw) || !raw.every((x) => typeof x === "string")) {
+  const cssSet = new Set(props);
+  const orphans = lengthProps.filter((p) => !cssSet.has(p));
+  if (orphans.length > 0) {
     throw new Error(
-      "Expected `bun run export:css-props` to print a JSON array of strings.",
+      `Length properties absent from the CSS property set: ${orphans.join(", ")}. ` +
+        "The two sets are generated from the same source and must stay consistent.",
     );
   }
-  const props = raw as string[];
 
   // --- Sort-order verification -------------------------------------------
   // Rust's `&[&str]::binary_search` orders elements by `str`'s `Ord` impl,
@@ -79,7 +128,7 @@ function main() {
   // than merely assuming it — if @meonode/ui ever introduces a non-ASCII
   // property name, this script fails loudly instead of silently emitting a
   // Rust array that `binary_search` can't correctly probe.
-  for (const p of props) {
+  for (const p of [...props, ...lengthProps]) {
     if (!/^[\x00-\x7f]*$/.test(p)) {
       throw new Error(
         `Non-ASCII CSS property name encountered: ${JSON.stringify(p)}. ` +
@@ -103,18 +152,28 @@ function main() {
     }
   }
 
-  const rustFile = renderRust(sorted);
+  const sortedLengths = [...new Set(lengthProps)].sort();
+  for (let i = 1; i < sortedLengths.length; i++) {
+    if (!(sortedLengths[i - 1] < sortedLengths[i])) {
+      throw new Error(
+        `Length sort invariant violated at index ${i}: ${JSON.stringify(sortedLengths[i - 1])} >= ${JSON.stringify(sortedLengths[i])}`,
+      );
+    }
+  }
+
+  const rustFile = renderRust(sorted, sortedLengths);
 
   mkdirSync(dirname(OUT_PATH), { recursive: true });
   writeFileSync(OUT_PATH, rustFile, "utf8");
 
   console.log(
-    `Wrote ${sorted.length} CSS property names to ${OUT_PATH.replace(REPO_ROOT + "/", "")}`,
+    `Wrote ${sorted.length} CSS property names and ${sortedLengths.length} length properties to ${OUT_PATH.replace(REPO_ROOT + "/", "")}`,
   );
 }
 
-function renderRust(sorted: string[]): string {
+function renderRust(sorted: string[], sortedLengths: string[]): string {
   const entries = sorted.map((p) => `    ${JSON.stringify(p)},`).join("\n");
+  const lengthEntries = sortedLengths.map((p) => `    ${JSON.stringify(p)},`).join("\n");
 
   return `// @generated by scripts/codegen-css-set.ts — do not edit. Source: @meonode/ui css-properties.const.ts
 //
@@ -134,6 +193,30 @@ ${entries}
 /// \`@meonode/ui\`'s \`css-properties.const.ts\`.
 pub fn is_css_prop(name: &str) -> bool {
     CSS_PROPS.binary_search(&name).is_ok()
+}
+
+/// Properties whose value is a length, where a bare number is invalid.
+///
+/// A theme token used for one of these is rewritten to
+/// \`var(--x--len, var(--x))\` so a numeric token value arrives with its unit.
+/// The runtime makes the identical choice from the identical set, which is why
+/// this is generated rather than hand-maintained: a disagreement would emit a
+/// reference to a variable the other side never defined, and the browser drops
+/// such a declaration silently.
+///
+/// Derived in \`@meonode/ui\` as the properties \`csstype\` parameterises by
+/// \`TLength\`, intersected with the CSS property set above, minus
+/// \`@emotion/unitless\`. That last subtraction keeps \`lineHeight\`, \`flex\`,
+/// \`tabSize\` and \`strokeWidth\` out: they accept a length *and* a bare number,
+/// and there the bare number is what the author meant.
+pub static LENGTH_PROPS: &[&str] = &[
+${lengthEntries}
+];
+
+/// Returns true if \`name\` is a length-valued CSS property, i.e. one where a
+/// theme token must carry a unit.
+pub fn is_length_prop(name: &str) -> bool {
+    LENGTH_PROPS.binary_search(&name).is_ok()
 }
 
 #[cfg(test)]
@@ -161,6 +244,41 @@ mod tests {
     #[test]
     fn rejects_non_css_props() {
         assert!(!is_css_prop("id"));
+    }
+
+    #[test]
+    fn length_props_is_sorted() {
+        assert!(
+            LENGTH_PROPS.windows(2).all(|w| w[0] < w[1]),
+            "LENGTH_PROPS must be strictly sorted in byte order for binary_search to work"
+        );
+    }
+
+    #[test]
+    fn length_props_is_a_subset_of_css_props() {
+        for name in LENGTH_PROPS {
+            assert!(
+                is_css_prop(name),
+                "{name} is a length property but not a recognized CSS property"
+            );
+        }
+    }
+
+    #[test]
+    fn recognizes_length_props() {
+        assert!(is_length_prop("padding"));
+        assert!(is_length_prop("borderRadius"));
+    }
+
+    #[test]
+    fn rejects_properties_where_a_bare_number_is_meaningful() {
+        // Accept a length *and* a bare number; the bare number is the intent.
+        assert!(!is_length_prop("lineHeight"));
+        assert!(!is_length_prop("flex"));
+        assert!(!is_length_prop("tabSize"));
+        // Purely unitless.
+        assert!(!is_length_prop("zIndex"));
+        assert!(!is_length_prop("opacity"));
     }
 }
 `;
