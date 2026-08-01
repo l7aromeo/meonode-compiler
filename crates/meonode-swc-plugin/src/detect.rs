@@ -506,16 +506,28 @@ fn classify_props(call: &CallExpr, props_arg_idx: usize) -> Decision {
 ///
 /// False for [`BailReason::ExistingMarker`]: that call site already carries a
 /// marker, and stamping a second one would produce a contradictory contract.
+///
+/// False for [`BailReason::ComputedKey`] for the same reason, less obviously.
+/// The existing-marker check reads `PropName::Ident` and `PropName::Str` only,
+/// so a marker written with a computed key — `{ [COMPILED_MARKER]: 3 }`, which
+/// is how a caller referencing the exported constant writes it — is invisible
+/// to it. Such a call site bails as `ComputedKey`, and stamping there would
+/// append a second `__meo$` beside one the plugin simply could not see. Since a
+/// computed key is by definition not statically resolvable, the conservative
+/// reading is that any computed key *might* be the marker, so these call sites
+/// forgo the key. They lose collision immunity, which is the same position they
+/// were in before schema 3 existed — strictly better than emitting a
+/// contradictory contract.
 fn is_key_stampable(reason: &BailReason) -> bool {
     match reason {
         BailReason::TrailingSpread
-        | BailReason::ComputedKey
         | BailReason::NumericKey
         | BailReason::GetterSetterProp
         | BailReason::MethodProp
         | BailReason::UnsupportedPropKind
         | BailReason::EffectfulReorder => true,
-        BailReason::ExistingMarker
+        BailReason::ComputedKey
+        | BailReason::ExistingMarker
         | BailReason::ShadowedOrUnbound
         | BailReason::NamespaceImport
         | BailReason::MissingPropsArg
@@ -1213,8 +1225,16 @@ mod tests {
         assert_eq!(decisions, vec![Decision::Compilable { props_arg_idx: 0 }]);
     }
 
+    /// A computed key forgoes the call-site key as well as partitioning.
+    ///
+    /// The key alone would be safe against *evaluation order* — it appends two
+    /// constant props and changes nothing — but not against a marker the
+    /// existing-marker check cannot see. `{ [COMPILED_MARKER]: 3 }` is a marker
+    /// written with a computed key, and stamping there emits a second `__meo$`
+    /// beside it. Since a computed key is not statically resolvable, the only
+    /// sound reading is that it might be the marker.
     #[test]
-    fn computed_key_bails() {
+    fn computed_key_bails_without_a_key() {
         let decisions = decisions_for(
             r#"
             import { Div } from '@meonode/ui';
@@ -1222,7 +1242,20 @@ mod tests {
             Div({ [key]: 1 });
             "#,
         );
-        assert_eq!(decisions, vec![Decision::KeyOnly { props_arg_idx: 0 }]);
+        assert_eq!(decisions, vec![Decision::Bail(BailReason::ComputedKey)]);
+    }
+
+    /// The case that motivated it: a caller stamping the marker themselves via
+    /// the exported constant. Nothing may be appended here.
+    #[test]
+    fn computed_marker_key_is_never_double_stamped() {
+        let decisions = decisions_for(
+            r#"
+            import { Div } from '@meonode/ui';
+            Div({ [COMPILED_MARKER]: 3, [SK.key]: 'site', padding: 1 });
+            "#,
+        );
+        assert_eq!(decisions, vec![Decision::Bail(BailReason::ComputedKey)]);
     }
 
     #[test]
