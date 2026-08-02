@@ -1,3 +1,17 @@
+> [!IMPORTANT]
+> **This repository has moved.** `@meonode/compiler` is now developed in the
+> [l7aromeo/meonode](https://github.com/l7aromeo/meonode) monorepo, alongside its
+> sibling packages, under [`packages/compiler`](https://github.com/l7aromeo/meonode/tree/main/packages/compiler).
+>
+> This repository is archived and read-only. Its history, tags and releases are
+> kept here for reference — the monorepo carries the same history, with tags
+> renamed to `@meonode/compiler@<version>`.
+>
+> Please open issues and pull requests on
+> [l7aromeo/meonode](https://github.com/l7aromeo/meonode/issues).
+
+---
+
 # @meonode/compiler
 
 **Experimental.** An SWC WASM plugin (Rust, compiled to `wasm32-wasip1`) that
